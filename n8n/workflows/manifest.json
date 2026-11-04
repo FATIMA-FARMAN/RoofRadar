@@ -1,0 +1,327 @@
+[
+  {
+    "key": "01",
+    "name": "RR 01 · Inbound Website Lead",
+    "file": "01-inbound-website-lead.json",
+    "nodes": 14,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "POST /webhook/primehome-lead"
+    ]
+  },
+  {
+    "key": "02",
+    "name": "RR 02 · Inbound Meta Lead Ads",
+    "file": "02-inbound-meta-lead-ads.json",
+    "nodes": 21,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "GET /webhook/roofradar/meta",
+      "POST /webhook/roofradar/meta"
+    ]
+  },
+  {
+    "key": "03",
+    "name": "RR 03 · Inbound SMS",
+    "file": "03-inbound-sms.json",
+    "nodes": 23,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "POST /webhook/roofradar/sms"
+    ]
+  },
+  {
+    "key": "04",
+    "name": "RR 04 · AI Router",
+    "file": "04-ai-router.json",
+    "nodes": 34,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "05",
+    "name": "RR 05 · AI Qualification",
+    "file": "05-ai-qualification.json",
+    "nodes": 24,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "06",
+    "name": "RR 06 · AI Conversation",
+    "file": "06-ai-conversation.json",
+    "nodes": 14,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "07",
+    "name": "RR 07 · Send SMS / WhatsApp",
+    "file": "07-send-sms-whatsapp.json",
+    "nodes": 11,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "08",
+    "name": "RR 08 · Inbound WhatsApp",
+    "file": "08-inbound-whatsapp.json",
+    "nodes": 23,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "POST /webhook/roofradar/whatsapp"
+    ]
+  },
+  {
+    "key": "09",
+    "name": "RR 09 · Booking Availability",
+    "file": "09-booking-availability.json",
+    "nodes": 13,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "10",
+    "name": "RR 10 · Book Appointment",
+    "file": "10-book-appointment.json",
+    "nodes": 29,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "11",
+    "name": "RR 11 · Appointment Reminders",
+    "file": "11-appointment-reminders.json",
+    "nodes": 10,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "12",
+    "name": "RR 12 · CRM Sync (HubSpot)",
+    "file": "12-crm-sync-hubspot.json",
+    "nodes": 15,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "13",
+    "name": "RR 13 · Follow-up Engine",
+    "file": "13-follow-up-engine.json",
+    "nodes": 13,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "14",
+    "name": "RR 14 · Missed Call Recovery",
+    "file": "14-missed-call-recovery.json",
+    "nodes": 14,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "POST /webhook/roofradar/call-status"
+    ]
+  },
+  {
+    "key": "15",
+    "name": "RR 15 · Human Handoff",
+    "file": "15-human-handoff.json",
+    "nodes": 13,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "16",
+    "name": "RR 16 · Quote Follow-up",
+    "file": "16-quote-follow-up.json",
+    "nodes": 12,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "17",
+    "name": "RR 17 · Analytics",
+    "file": "17-analytics.json",
+    "nodes": 5,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "18",
+    "name": "RR 18 · Daily Report",
+    "file": "18-daily-report.json",
+    "nodes": 7,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "19",
+    "name": "RR 19 · Error Handler",
+    "file": "19-error-handler.json",
+    "nodes": 10,
+    "activate": false,
+    "triggers": [
+      "errorTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "20",
+    "name": "RR 20 · Retry Queue",
+    "file": "20-retry-queue.json",
+    "nodes": 13,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "21",
+    "name": "RR 21 · Consent",
+    "file": "21-consent.json",
+    "nodes": 9,
+    "activate": false,
+    "triggers": [
+      "executeWorkflowTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "22",
+    "name": "RR 22 · Monitoring",
+    "file": "22-monitoring.json",
+    "nodes": 10,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "23",
+    "name": "RR 23 · Data Maintenance",
+    "file": "23-data-maintenance.json",
+    "nodes": 11,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "24A",
+    "name": "RR 24A · Voice AI Tool Gateway",
+    "file": "24a-voice-ai-tool-gateway.json",
+    "nodes": 27,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "POST /webhook/roofradar/voice-tool"
+    ]
+  },
+  {
+    "key": "24B",
+    "name": "RR 24B · Voice Post-Call",
+    "file": "24b-voice-post-call.json",
+    "nodes": 17,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "POST /webhook/roofradar/voice-call-ended"
+    ]
+  },
+  {
+    "key": "24C",
+    "name": "RR 24C · Voice Transfer Result",
+    "file": "24c-voice-transfer-result.json",
+    "nodes": 6,
+    "activate": true,
+    "triggers": [
+      "webhook"
+    ],
+    "webhooks": [
+      "POST /webhook/roofradar/voice-transfer-result"
+    ]
+  },
+  {
+    "key": "25",
+    "name": "RR 25 · No-show Recovery",
+    "file": "25-no-show-recovery.json",
+    "nodes": 11,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  },
+  {
+    "key": "26",
+    "name": "RR 26 · Lead Re-engagement",
+    "file": "26-lead-re-engagement.json",
+    "nodes": 9,
+    "activate": true,
+    "triggers": [
+      "scheduleTrigger"
+    ],
+    "webhooks": []
+  }
+]

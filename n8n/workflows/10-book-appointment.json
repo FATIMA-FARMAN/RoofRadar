@@ -1,0 +1,979 @@
+{
+  "name": "RR 10 · Book Appointment",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "07ea1507-a3f3-44e8-961c-9c94b46ef67e",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT to_jsonb(l.*) AS lead,\n       to_jsonb(o.*) AS org,\n       rr_can_contact(l.id, coalesce(NULLIF($2::text,''), 'sms')) AS can_contact,\n       (SELECT to_jsonb(a.*) FROM appointments a\n         WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW()\n         ORDER BY a.start_at LIMIT 1) AS upcoming_appointment\nFROM leads l JOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, 'sms' ] }}"
+        }
+      },
+      "id": "24750ddb-fea1-4908-8d5f-fcb95a677a84",
+      "name": "GET_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, timezone, settings FROM organizations WHERE id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead.organization_id ] }}"
+        }
+      },
+      "id": "9a97b312-4b19-4b92-ad9b-3de00735d8db",
+      "name": "GET_COMPANY_RULES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst ctx = $('GET_LEAD').first().json;\nconst org = $('GET_COMPANY_RULES').first().json;\nconst s = org.settings || {};\nconst tz = org.timezone || 'America/New_York';\nconst md = ctx.lead.metadata || {};\nconst offered = md.offered_slots || [];\nconst errors = [];\nconst start = DateTime.fromISO(String(t.slot || t.requested_datetime || ''), { setZone: true });\nif (!start.isValid) errors.push('slot is not a valid ISO datetime');\nelse if (start.toMillis() <= Date.now()) errors.push('slot is in the past');\nconst match = offered.find(o => DateTime.fromISO(o.iso).toMillis() === start.toMillis());\nif (!match) errors.push('slot was not offered to this lead');\nif (md.offered_at && (Date.now() - new Date(md.offered_at).getTime()) > 72 * 3600e3) errors.push('offer expired');\nif (!ctx.lead.phone && !ctx.lead.email) errors.push('lead has no contact method');\nconst mins = s.slot_minutes || 60;\nconst local = start.isValid ? start.setZone(tz) : null;\nreturn [{ json: {\n  valid: errors.length === 0, errors,\n  lead_id: ctx.lead.id, organization_id: ctx.lead.organization_id,\n  reschedule: !!t.reschedule, channel: t.channel || 'sms', source: t.source || 'router',\n  start_iso: start.isValid ? start.toUTC().toISO() : null,\n  end_iso: start.isValid ? start.plus({ minutes: mins }).toUTC().toISO() : null,\n  local_start: local ? local.toISO() : null,\n  local_end: local ? local.plus({ minutes: mins }).toISO() : null,\n  label: local ? local.toFormat(\"cccc, LLL d 'at' h:mm a\") : null,\n  tz, calendar_id: s.calendar_id || 'primary'\n}}];"
+      },
+      "id": "611a3e22-c20b-4e1f-bf4c-40355edec1ea",
+      "name": "VALIDATE_REQUEST",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "ee90ba2d-4706-4504-9b64-386f18916a9c",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a2458516-6f2f-4ef0-8833-60031a980c53",
+      "name": "REQUEST_VALID?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM appointments\nWHERE lead_id = $1::uuid AND start_at = $2::timestamptz AND status IN ('SCHEDULED','CONFIRMED')\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead_id, $json.start_iso ] }}"
+        }
+      },
+      "id": "53233153-0e51-4c62-94c2-882e577460c9",
+      "name": "IDEMPOTENCY_CHECK",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "5365b1fb-1172-4569-bc22-fa7346d22f53",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "07269c00-86d4-4e71-afd8-94c6b1aba915",
+      "name": "ALREADY_BOOKED?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('VALIDATE_REQUEST').first().json;\nreturn [{ json: { booked: true, duplicate: true, appointment_id: $json.id, start_iso: v.local_start, label: v.label } }];"
+      },
+      "id": "3599bf3d-444a-4edd-949c-4dfddbb4c2d1",
+      "name": "RETURN_EXISTING",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/calendar/v3/freeBusy",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ timeMin: $('VALIDATE_REQUEST').first().json.start_iso, timeMax: $('VALIDATE_REQUEST').first().json.end_iso, timeZone: $('VALIDATE_REQUEST').first().json.tz, items: [{ id: $('VALIDATE_REQUEST').first().json.calendar_id }] }) }}"
+      },
+      "id": "4914b34c-63e3-401b-ac0e-ff18bb094833",
+      "name": "RECHECK_AVAILABILITY",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2060,
+        480
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "__CRED_GCAL_ID__",
+          "name": "RoofRadar Google Calendar"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "103d9f79-5e5b-4684-84d6-5334677cd647",
+              "leftValue": "={{ Object.values($json.calendars || {}).every(c => !(c.errors || []).length && !(c.busy || []).length) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e0c8bdc2-f288-413c-9ce7-6b1a4d320760",
+      "name": "SLOT_STILL_AVAILABLE?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/{{ encodeURIComponent($('VALIDATE_REQUEST').first().json.calendar_id) }}/events",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ summary: 'Roof inspection — ' + ($('GET_LEAD').first().json.lead.name || $('GET_LEAD').first().json.lead.phone), location: $('GET_LEAD').first().json.lead.address || '', description: 'Booked by RoofRadar AI\\nPhone: ' + ($('GET_LEAD').first().json.lead.phone || '') + '\\nProblem: ' + ($('GET_LEAD').first().json.lead.problem_type || 'n/a') + (['LOW','MEDIUM','HIGH','EMERGENCY'].includes($('GET_LEAD').first().json.lead.urgency) ? '\\nUrgency: ' + $('GET_LEAD').first().json.lead.urgency : '') + ($('GET_LEAD').first().json.lead.lead_score > 0 ? '\\nLead score: ' + $('GET_LEAD').first().json.lead.lead_score : ''), start: { dateTime: $('VALIDATE_REQUEST').first().json.local_start, timeZone: $('VALIDATE_REQUEST').first().json.tz }, end: { dateTime: $('VALIDATE_REQUEST').first().json.local_end, timeZone: $('VALIDATE_REQUEST').first().json.tz }, extendedProperties: { private: { roofradar_lead_id: $('VALIDATE_REQUEST').first().json.lead_id } } }) }}"
+      },
+      "id": "87dc8a81-1cac-455e-8529-6b4830630959",
+      "name": "CREATE_GOOGLE_EVENT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "__CRED_GCAL_ID__",
+          "name": "RoofRadar Google Calendar"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO appointments (organization_id, lead_id, external_event_id, start_at, end_at, status, notes)\nVALUES ($1::uuid, $2::uuid, $3::text, $4::timestamptz, $5::timestamptz, 'SCHEDULED', $6::text)\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_REQUEST').first().json.organization_id, $('VALIDATE_REQUEST').first().json.lead_id, $json.id, $('VALIDATE_REQUEST').first().json.start_iso, $('VALIDATE_REQUEST').first().json.end_iso, 'Booked via ' + $('VALIDATE_REQUEST').first().json.channel ] }}"
+        }
+      },
+      "id": "07f0a833-0a02-4263-ba53-dad30c1c59a3",
+      "name": "CREATE_APPOINTMENT_DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/{{ encodeURIComponent($('VALIDATE_REQUEST').first().json.calendar_id) }}/events/{{ $('CREATE_GOOGLE_EVENT').first().json.id }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api"
+      },
+      "id": "5a02cb2f-90e9-435e-9949-00289baec2f0",
+      "name": "ROLLBACK_GOOGLE_EVENT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3100,
+        300
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "__CRED_GCAL_ID__",
+          "name": "RoofRadar Google Calendar"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH u AS (\n  UPDATE appointments SET status = 'RESCHEDULED'\n  WHERE lead_id = $1::uuid AND id <> $2::uuid AND status IN ('SCHEDULED','CONFIRMED') AND $3::boolean\n  RETURNING id, external_event_id, start_at\n), link AS (\n  UPDATE appointments SET rescheduled_from = (SELECT id FROM u ORDER BY start_at LIMIT 1)\n  WHERE id = $2::uuid AND EXISTS (SELECT 1 FROM u) RETURNING id\n)\nSELECT u.*, (SELECT count(*) FROM link) AS linked FROM u ORDER BY start_at LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_REQUEST').first().json.lead_id, $json.id, $('VALIDATE_REQUEST').first().json.reschedule ] }}"
+        }
+      },
+      "id": "77ab3ba4-fb70-4058-be3b-dae1343e6934",
+      "name": "CANCEL_PREVIOUS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3100,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c33b8489-bcfd-40f8-8254-e7039eba070f",
+              "leftValue": "={{ !!$json.external_event_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "147d1191-bf0a-4ccb-84cb-2343c0a6f4c4",
+      "name": "HAS_OLD_EVENT?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/{{ encodeURIComponent($('VALIDATE_REQUEST').first().json.calendar_id) }}/events/{{ $json.external_event_id }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api"
+      },
+      "id": "3568eabc-d187-4e93-95b8-6506408260a7",
+      "name": "DELETE_OLD_GOOGLE_EVENT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3620,
+        300
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "__CRED_GCAL_ID__",
+          "name": "RoofRadar Google Calendar"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET status = 'BOOKED',\n       metadata = (metadata - 'offered_slots') || jsonb_build_object('last_booked_at', NOW())\nWHERE id = $1::uuid\nRETURNING id, rr_cancel_followups(id, 'BOOKED') AS cancelled_followups;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_REQUEST').first().json.lead_id ] }}"
+        }
+      },
+      "id": "61bb6463-2f76-482d-a0e0-62410a42f865",
+      "name": "UPDATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3880,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO deals (organization_id, lead_id, appointment_id, stage)\nVALUES ($1::uuid, $2::uuid, $3::uuid, 'INSPECTION_BOOKED')\nON CONFLICT (lead_id) WHERE stage NOT IN ('WON','LOST')\nDO UPDATE SET appointment_id = EXCLUDED.appointment_id,\n              stage = CASE WHEN deals.stage IN ('INSPECTION_BOOKED','INSPECTED') THEN 'INSPECTION_BOOKED' ELSE deals.stage END\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_REQUEST').first().json.organization_id, $('VALIDATE_REQUEST').first().json.lead_id, $('CREATE_APPOINTMENT_DB').first().json.id ] }}"
+        }
+      },
+      "id": "7bea075c-dcf0-4781-833a-097b9198cb13",
+      "name": "CREATE_DEAL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4140,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $('VALIDATE_REQUEST').first().json.lead_id } }];"
+      },
+      "id": "fcddf85b-bc1e-4451-9597-f307c36e9ced",
+      "name": "PREP_CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__12__"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "c1e82df7-e7db-4c7a-ad3d-8042444dc497",
+      "name": "CRM_SYNC",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('VALIDATE_REQUEST').first().json;\nconst org = $('GET_COMPANY_RULES').first().json;\nconst lead = $('GET_LEAD').first().json.lead;\nconst verb = v.reschedule ? 'has been moved to' : 'is confirmed for';\nconst body = `Your ${org.name} roof inspection ${verb} ${v.label}.` +\n  (lead.address ? ` Address: ${lead.address}.` : '') +\n  ` Our inspector will call when on the way. Need to change it? Just reply here.`;\nreturn [{ json: { lead_id: v.lead_id, channel: v.channel === 'whatsapp' ? 'whatsapp' : 'sms', body,\n                   kind: 'BOOKING_CONFIRMATION', ai_generated: false } }];"
+      },
+      "id": "239a3c2f-f462-4137-b258-916a5fa5fff6",
+      "name": "PREP_CONFIRMATION",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__07__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "da379f64-d230-41a3-937a-3a9673ccadee",
+      "name": "SEND_CONFIRMATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        5180,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('GET_COMPANY_RULES').first().json.settings.slack_channel }}"
+        },
+        "text": "={{ (($('VALIDATE_REQUEST').first().json.reschedule) ? '🔁 RESCHEDULED' : '🔥 NEW BOOKED LEAD') + '\\n\\n' + ($('GET_LEAD').first().json.lead.name || 'Unknown') + '\\n' + ($('GET_LEAD').first().json.lead.problem_type || 'Roof issue') + '\\n' + ($('GET_LEAD').first().json.lead.address || 'Address TBC') + '\\n' + $('VALIDATE_REQUEST').first().json.label + ' inspection' + ($('GET_LEAD').first().json.lead.lead_score > 0 ? '\\nLead score: ' + $('GET_LEAD').first().json.lead.lead_score : '') + '\\nPhone: ' + $('GET_LEAD').first().json.lead.phone }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "2b76478a-6c5f-4477-b3d0-4ceabdc99541",
+      "name": "ALERT_SALES",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        5440,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, '10_BOOK_APPOINTMENT', $3::text, $4::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_REQUEST').first().json.organization_id, $('VALIDATE_REQUEST').first().json.lead_id, $('VALIDATE_REQUEST').first().json.reschedule ? 'APPOINTMENT_RESCHEDULED' : 'APPOINTMENT_BOOKED', JSON.stringify({appointment_id: $('CREATE_APPOINTMENT_DB').first().json.id, start: $('VALIDATE_REQUEST').first().json.start_iso, source: $('VALIDATE_REQUEST').first().json.source}) ] }}"
+        }
+      },
+      "id": "bff53c4a-035c-440b-9793-b3f55ce85cab",
+      "name": "LOG_EVENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        5700,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('VALIDATE_REQUEST').first().json;\nreturn [{ json: { booked: true, duplicate: false, appointment_id: $('CREATE_APPOINTMENT_DB').first().json.id, start_iso: v.local_start,\n                   label: v.label, reschedule: v.reschedule } }];"
+      },
+      "id": "de4b7fa3-1e83-4bd0-8c35-c7c10e16fd6c",
+      "name": "RETURN_BOOKED",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5960,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('VALIDATE_REQUEST').first().json;\nlet reason = 'slot_unavailable';\nif (!v.valid) reason = (v.errors || []).join('; ');\nreturn [{ json: { lead_id: v.lead_id, preferred_date: v.local_start ? v.local_start.slice(0, 10) : null,\n                   preferred_time: v.local_start ? v.local_start.slice(11, 16) : null, _reason: reason } }];"
+      },
+      "id": "87c20f8a-c0ac-443e-bb66-c32c9534949a",
+      "name": "PREP_ALTERNATIVES",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__09__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "963632fa-93b6-4146-a828-738261275dae",
+      "name": "EXECUTE_09_AVAILABILITY",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3620,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { booked: false,\n  reason: $('PREP_ALTERNATIVES').first().json._reason,\n  alternatives: $json.available_slots || [] } }];"
+      },
+      "id": "2fa62d08-a025-47e2-970f-ef38ef36f648",
+      "name": "RETURN_ALTERNATIVES",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3880,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 10 · Book Appointment\nThree layers against double-booking: (1) the slot must be one we **offered** this lead,\n(2) idempotency check on (lead, start) + live `freeBusy` re-check, (3) the DB exclusion constraint\n`appt_no_overlap` — if it fires, the Google event is rolled back and fresh alternatives are returned.\nReschedule = book new → mark old RESCHEDULED → delete old Google event.",
+        "width": 620,
+        "height": 260
+      },
+      "id": "a9d4a995-af03-4313-8bf2-3ad32c6dcbb8",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_LEAD": {
+      "main": [
+        [
+          {
+            "node": "GET_COMPANY_RULES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_COMPANY_RULES": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_REQUEST",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_REQUEST": {
+      "main": [
+        [
+          {
+            "node": "REQUEST_VALID?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "REQUEST_VALID?": {
+      "main": [
+        [
+          {
+            "node": "IDEMPOTENCY_CHECK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_ALTERNATIVES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IDEMPOTENCY_CHECK": {
+      "main": [
+        [
+          {
+            "node": "ALREADY_BOOKED?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ALREADY_BOOKED?": {
+      "main": [
+        [
+          {
+            "node": "RETURN_EXISTING",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RECHECK_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RECHECK_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "SLOT_STILL_AVAILABLE?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SLOT_STILL_AVAILABLE?": {
+      "main": [
+        [
+          {
+            "node": "CREATE_GOOGLE_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_ALTERNATIVES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_GOOGLE_EVENT": {
+      "main": [
+        [
+          {
+            "node": "CREATE_APPOINTMENT_DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_APPOINTMENT_DB": {
+      "main": [
+        [
+          {
+            "node": "CANCEL_PREVIOUS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ROLLBACK_GOOGLE_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROLLBACK_GOOGLE_EVENT": {
+      "main": [
+        [
+          {
+            "node": "PREP_ALTERNATIVES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CANCEL_PREVIOUS": {
+      "main": [
+        [
+          {
+            "node": "HAS_OLD_EVENT?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HAS_OLD_EVENT?": {
+      "main": [
+        [
+          {
+            "node": "DELETE_OLD_GOOGLE_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "UPDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DELETE_OLD_GOOGLE_EVENT": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "CREATE_DEAL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_DEAL": {
+      "main": [
+        [
+          {
+            "node": "PREP_CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_CRM": {
+      "main": [
+        [
+          {
+            "node": "CRM_SYNC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM_SYNC": {
+      "main": [
+        [
+          {
+            "node": "PREP_CONFIRMATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_CONFIRMATION": {
+      "main": [
+        [
+          {
+            "node": "SEND_CONFIRMATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_CONFIRMATION": {
+      "main": [
+        [
+          {
+            "node": "ALERT_SALES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ALERT_SALES": {
+      "main": [
+        [
+          {
+            "node": "LOG_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_EVENT": {
+      "main": [
+        [
+          {
+            "node": "RETURN_BOOKED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_ALTERNATIVES": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_09_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_09_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "RETURN_ALTERNATIVES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "10",
+    "description": "Validate → idempotency → re-check calendar → Google event → DB (exclusion constraint) → deal → CRM → confirmation"
+  }
+}

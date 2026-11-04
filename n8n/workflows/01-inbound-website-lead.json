@@ -1,0 +1,472 @@
+{
+  "name": "RR 01 · Inbound Website Lead",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "primehome-lead",
+        "options": {}
+      },
+      "id": "05ea3262-9a6f-4e45-821c-4be27cabfb71",
+      "name": "WEBSITE_LEAD_WEBHOOK",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "96bc9a6d-989f-470e-95c7-efd11562ef30"
+    },
+    {
+      "parameters": {
+        "jsCode": "// E.164 normaliser. Assumes US/Canada (+1) when a bare 10/11-digit number arrives.\nfunction normalizePhone(phone) {\n  if (!phone) return null;\n  let p = String(phone).trim().replace(/^whatsapp:/i, '').replace(/[^\\d+]/g, '');\n  if (p.startsWith('00')) p = '+' + p.substring(2);\n  if (!p.startsWith('+') && p.length === 10) p = '+1' + p;\n  if (!p.startsWith('+') && p.length === 11 && p.startsWith('1')) p = '+' + p;\n  return /^\\+[1-9]\\d{7,14}$/.test(p) ? p : null;\n}\n\nconst b = $json.body ?? $json;\nconst clean = v => (v === undefined || v === null) ? null : (String(v).trim() || null);\nconst email = clean(b.email);\nconst phone_e164 = normalizePhone(b.phone);\nconst errors = [];\nif (!clean(b.name)) errors.push('name is required');\nif (!phone_e164 && !email) errors.push('a valid phone (E.164) or email is required');\nif (email && !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) errors.push('email is invalid');\nif (clean(b.website)) errors.push('honeypot filled (spam)');           // hidden field bots fill in\nconst consent = b.sms_consent === true || b.sms_consent === 'true' || b.sms_consent === 'on';\nreturn { json: {\n  org_slug: clean(b.org) || 'primehome',\n  name: clean(b.name),\n  phone_e164,\n  phone_raw: clean(b.phone),\n  email: email ? email.toLowerCase() : null,\n  address: clean(b.address),\n  problem_type: clean(b.problem_type),\n  message: clean(b.message),\n  external_id: null,\n  sms_consent: consent,\n  consent_text: clean(b.consent_text) || (consent ? 'Website form SMS consent checkbox' : null),\n  valid: errors.length === 0,\n  errors\n}};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "57310644-be90-466c-a5bb-57bdd5e7c802",
+      "name": "NORMALIZE_LEAD",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "652178f6-6b8e-4420-bb78-55a14224adcb",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9ca863fc-e522-407c-8325-64fed36c959d",
+      "name": "VALIDATE_LEAD",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event(NULL, NULL, '01_INBOUND_WEBSITE', 'INVALID_LEAD', $1::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json) ] }}"
+        }
+      },
+      "id": "e819d9c6-2736-41e8-858a-1f713b55e4a4",
+      "name": "LOG_INVALID_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, settings FROM organizations WHERE slug = $1::text AND active LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.org_slug ] }}"
+        }
+      },
+      "id": "161a7c26-430d-46c5-b01a-4edf5f72aa93",
+      "name": "RESOLVE_ORG",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM leads\nWHERE organization_id = $1::uuid\n  AND (\n        phone = $2::text\n     OR ($3::text IS NOT NULL AND lower(email) = lower($3::text))\n     OR ($4::text IS NOT NULL AND external_id = $4::text)\n  )\nORDER BY (phone = $2::text) DESC NULLS LAST, created_at\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').item.json.id, $('NORMALIZE_LEAD').item.json.phone_e164, $('NORMALIZE_LEAD').item.json.email, $('NORMALIZE_LEAD').item.json.external_id ] }}"
+        }
+      },
+      "id": "d9e241c5-5aa6-4c7d-ad0e-ff9d39173e09",
+      "name": "FIND_EXISTING_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "232dee8f-3792-4750-9410-cdd1dd1ad161",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7a8ab5d9-1afd-45da-99d5-5d1cc9c2819b",
+      "name": "LEAD_EXISTS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET\n  name         = COALESCE(NULLIF($2::text,''), name),\n  email        = COALESCE(NULLIF($3::text,''), email),\n  address      = COALESCE(NULLIF($4::text,''), address),\n  problem_type = COALESCE(NULLIF($5::text,''), problem_type),\n  phone        = COALESCE(phone, NULLIF($6::text,'')),\n  external_id  = COALESCE(external_id, NULLIF($8::text,'')),\n  first_message = COALESCE(first_message, NULLIF($7::text,'')),\n  metadata     = metadata || jsonb_build_object('last_form_message', $7::text, 'last_form_at', NOW()),\n  status       = CASE WHEN status IN ('LOST','DISQUALIFIED') THEN 'NEW' ELSE status END\nWHERE id = $1::uuid\nRETURNING *, false AS is_new;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('NORMALIZE_LEAD').item.json.name, $('NORMALIZE_LEAD').item.json.email, $('NORMALIZE_LEAD').item.json.address, $('NORMALIZE_LEAD').item.json.problem_type, $('NORMALIZE_LEAD').item.json.phone_e164, $('NORMALIZE_LEAD').item.json.message, $('NORMALIZE_LEAD').item.json.external_id ] }}"
+        }
+      },
+      "id": "664cd6db-0dfe-4609-8115-bc6080786894",
+      "name": "UPDATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (organization_id, name, phone, email, address, source, problem_type,\n                   first_message, external_id, status, preferred_channel)\nVALUES ($1::uuid, NULLIF($2::text,''), NULLIF($3::text,''), NULLIF($4::text,''), NULLIF($5::text,''),\n        $6::text, NULLIF($7::text,''), NULLIF($8::text,''), NULLIF($9::text,''), 'NEW', 'sms')\nON CONFLICT (organization_id, phone) WHERE phone IS NOT NULL\nDO UPDATE SET updated_at = NOW()\nRETURNING *, (xmax = 0) AS is_new;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').item.json.id, $('NORMALIZE_LEAD').item.json.name, $('NORMALIZE_LEAD').item.json.phone_e164, $('NORMALIZE_LEAD').item.json.email, $('NORMALIZE_LEAD').item.json.address, 'website', $('NORMALIZE_LEAD').item.json.problem_type, $('NORMALIZE_LEAD').item.json.message, $('NORMALIZE_LEAD').item.json.external_id ] }}"
+        }
+      },
+      "id": "2bba2808-4b06-4dda-adee-43714ec3fe7b",
+      "name": "CREATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH c AS (\n  INSERT INTO consents (lead_id, channel, consent_status, source, metadata)\n  SELECT $1::uuid, 'sms', 'OPTED_IN', $3::text, jsonb_build_object('disclosure', $4::text)\n  WHERE $2::boolean\n  RETURNING id\n), n AS (\n  SELECT CASE WHEN $5::boolean THEN rr_schedule_nurture($1::uuid) ELSE 0 END AS scheduled\n), e AS (\n  SELECT rr_log_event($6::uuid, $1::uuid, $7::text,\n         CASE WHEN $5::boolean THEN 'LEAD_CREATED' ELSE 'LEAD_UPDATED' END, $8::jsonb) AS event_id\n)\nSELECT $1::uuid AS lead_id, $6::uuid AS organization_id, $5::boolean AS is_new,\n       (SELECT scheduled FROM n) AS followups_scheduled,\n       (SELECT count(*) FROM c)::int AS consent_rows,\n       (SELECT event_id FROM e) AS event_id,\n       rr_can_contact($1::uuid, 'sms') AS can_contact;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('NORMALIZE_LEAD').item.json.sms_consent, 'web_form', $('NORMALIZE_LEAD').item.json.consent_text || '', $json.is_new, $json.organization_id, '01_INBOUND_WEBSITE', JSON.stringify({source: 'website', problem_type: $('NORMALIZE_LEAD').item.json.problem_type, message: $('NORMALIZE_LEAD').item.json.message}) ] }}"
+        }
+      },
+      "id": "d1eb7ea0-efb3-495a-b644-eba25234ef2f",
+      "name": "LOG_EVENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "82321abe-7caf-4828-b5aa-f220102f0b24",
+              "leftValue": "={{ $json.is_new && $json.can_contact && !!$('NORMALIZE_LEAD').item.json.phone_e164 && ($('NORMALIZE_LEAD').item.json.sms_consent) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "58c5cc02-9bdb-4e39-81b8-7f586b88c0b4",
+      "name": "SHOULD_TEXT_NOW?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: {\n  lead_id: $json.lead_id,\n  organization_id: $json.organization_id,\n  channel: 'sms',\n  mode: 'FIRST_CONTACT',\n  inbound_text: $('NORMALIZE_LEAD').item.json.message || null\n}};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "fe24f1f0-8a4e-451a-a524-e9dc6196df1d",
+      "name": "PREP_FIRST_CONTACT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "160554b5-ccc8-4347-a34f-2ed3cb0055ff",
+      "name": "EXECUTE_06_AI_CONVERSATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        2840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 01 · Inbound Website\nPOST `/webhook/primehome-lead` with `name, phone, email, address, problem_type, message, sms_consent`.\nDuplicate protection: phone (unique index) → email → external id.\nNew lead + SMS consent → **06 FIRST_CONTACT** texts them within seconds.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "e0c4c569-0df8-4cf8-99e0-507ce26e7d60",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "WEBSITE_LEAD_WEBHOOK": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "RESOLVE_ORG",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_INVALID_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_EXISTING_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LEAD_EXISTS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LEAD_EXISTS?": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CREATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LOG_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LOG_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_EVENT": {
+      "main": [
+        [
+          {
+            "node": "SHOULD_TEXT_NOW?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHOULD_TEXT_NOW?": {
+      "main": [
+        [
+          {
+            "node": "PREP_FIRST_CONTACT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_FIRST_CONTACT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESOLVE_ORG": {
+      "main": [
+        [
+          {
+            "node": "FIND_EXISTING_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "01",
+    "description": "Website form → normalise → validate → find/update/create lead → consent + nurture → instant first SMS"
+  }
+}

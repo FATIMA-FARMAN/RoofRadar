@@ -1,0 +1,356 @@
+{
+  "name": "RR 25 · No-show Recovery",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "01f7ec7d-b5f4-4e23-87b0-4f2bbae2b529",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT a.id AS appointment_id, a.lead_id, a.organization_id\nFROM appointments a\nJOIN leads l ON l.id = a.lead_id\nJOIN organizations o ON o.id = a.organization_id\nWHERE a.status = 'NO_SHOW'\n  AND a.no_show_recovery_sent_at IS NULL\n  AND a.start_at > NOW() - INTERVAL '7 days'                      -- don't text about old misses\n  AND o.active AND l.phone IS NOT NULL AND NOT l.human_handoff\n  AND l.status NOT IN ('STOPPED','LOST','WON','DISQUALIFIED')\n  AND rr_can_contact(l.id, 'sms')\n  AND extract(hour FROM NOW() AT TIME ZONE o.timezone) BETWEEN 9 AND 19   -- quiet hours: 9:00–19:59 local\n  AND NOT EXISTS (SELECT 1 FROM appointments b WHERE b.lead_id = a.lead_id\n                  AND b.status IN ('SCHEDULED','CONFIRMED') AND b.start_at > NOW())  -- already rebooked\nORDER BY a.start_at\nLIMIT 10;",
+        "options": {}
+      },
+      "id": "786fd9db-24a9-4694-8f76-2a54bf3cbca0",
+      "name": "FIND_NO_SHOWS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c8689f56-ced7-4938-8491-b88e0992624b",
+              "leftValue": "={{ $json.appointment_id !== undefined && $json.appointment_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9deb4653-009d-4e71-892b-204cd21360cd",
+      "name": "FIND_NO_SHOWS_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH a AS (\n  UPDATE appointments SET no_show_recovery_sent_at = NOW()\n  WHERE id = $1::uuid AND no_show_recovery_sent_at IS NULL\n  RETURNING id AS appointment_id, lead_id, organization_id\n), l AS (   -- let the lead book again\n  UPDATE leads SET status = CASE WHEN status = 'BOOKED' THEN 'ENGAGED' ELSE status END\n  WHERE id = (SELECT lead_id FROM a) RETURNING id\n)\nSELECT a.* FROM a;",
+        "options": {
+          "queryReplacement": "={{ [ $json.appointment_id ] }}"
+        }
+      },
+      "id": "8924b328-f102-4578-9c9c-bebd8f9aefc2",
+      "name": "CLAIM_NO_SHOW",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "baa41092-504f-4231-b1bb-369e9efb68d4",
+              "leftValue": "={{ $json.appointment_id !== undefined && $json.appointment_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "47d5ddc6-378b-4159-9c0c-db183f7d7d81",
+      "name": "CLAIM_NO_SHOW_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: { lead_id: $json.lead_id } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "8b4e6b15-ac1d-4008-9e02-7ed5a066709c",
+      "name": "PREP_AVAILABILITY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__09__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "327dc360-d5b7-49ac-b61d-d6148b754abf",
+      "name": "EXECUTE_09_AVAILABILITY",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('CLAIM_NO_SHOW').item.json;\nconst slots = $json.available_slots || [];\nreturn { json: { lead_id: c.lead_id, organization_id: c.organization_id, channel: 'sms',\n                 mode: slots.length ? 'NO_SHOW' : 'NO_SLOTS', slots } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "42c1caaf-353a-452f-b465-c54e9435f935",
+      "name": "PREP_REBOOK_TEXT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "3b7aebf4-a9d7-4714-8b10-24e8e788784e",
+      "name": "EXECUTE_06_AI_CONVERSATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        2320,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, lead_id, type, description, metadata)\nVALUES ($1::uuid, $2::uuid, 'NO_SHOW_RECOVERY', 'Rebook text after missed inspection', $3::jsonb)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('CLAIM_NO_SHOW').item.json.organization_id, $('CLAIM_NO_SHOW').item.json.lead_id, JSON.stringify({appointment_id: $('CLAIM_NO_SHOW').item.json.appointment_id, sent: $json.sent === true}) ] }}"
+        }
+      },
+      "id": "c068d813-46f4-4baf-890c-118b7a3f9dc6",
+      "name": "LOG_ACTIVITY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 25 · No-show Recovery\nOnly a person knows an inspection was missed. Mark it in Supabase:\n`UPDATE appointments SET status='NO_SHOW' WHERE id='…';`\nWithin 30 minutes (9 AM–8 PM local) the customer gets one kind text with real open times; replying with a number rebooks through 04 → 10.\nClaim-then-send (`no_show_recovery_sent_at`) means it is never sent twice.",
+        "width": 620,
+        "height": 260
+      },
+      "id": "4658c8f0-0eed-4f1d-8568-af34c9c110e3",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "FIND_NO_SHOWS": {
+      "main": [
+        [
+          {
+            "node": "FIND_NO_SHOWS_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLAIM_NO_SHOW": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_NO_SHOW_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "FIND_NO_SHOWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_NO_SHOWS_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_NO_SHOW",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLAIM_NO_SHOW_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "PREP_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_09_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_09_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "PREP_REBOOK_TEXT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_REBOOK_TEXT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_06_AI_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "25",
+    "description": "Every 30 min: appointments a person marked NO_SHOW → claim once → real open slots (09) → kind rebook text (06)"
+  }
+}

@@ -1,0 +1,475 @@
+{
+  "name": "RR 13 · Follow-up Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "7a8ffa9a-936a-431b-b9b5-29e198ceae74",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT f.id AS followup_id, f.step, f.type, f.lead_id, f.created_at AS followup_created_at,\n       l.status, l.human_handoff, l.last_inbound_at, l.organization_id, l.preferred_channel,\n       o.timezone, rr_can_contact(l.id, 'sms') AS can_contact, (l.phone IS NOT NULL) AS has_phone\nFROM followups f\nJOIN leads l ON l.id = f.lead_id\nJOIN organizations o ON o.id = l.organization_id\nWHERE f.status = 'PENDING' AND f.due_at <= NOW() AND f.type IN ('NURTURE','MISSED_CALL')\nORDER BY f.due_at\nLIMIT 25;",
+        "options": {}
+      },
+      "id": "6aa122bf-8f41-48f9-b617-0d7f38fe1ee2",
+      "name": "FIND_FOLLOWUPS_DUE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst stopStatuses = ['BOOKED','HUMAN_HANDOFF','STOPPED','DISQUALIFIED','WON','LOST'];\nlet decision = 'SEND', reason = null, defer_until = null;\nif (stopStatuses.includes(r.status) || r.human_handoff) { decision = 'SKIP'; reason = 'status_' + (r.human_handoff ? 'HUMAN' : r.status); }\nelse if (!r.can_contact) { decision = 'SKIP'; reason = 'no_consent'; }\nelse if (!r.has_phone) { decision = 'SKIP'; reason = 'no_phone'; }\nelse if (r.last_inbound_at && new Date(r.last_inbound_at) > new Date(r.followup_created_at)) { decision = 'SKIP'; reason = 'customer_replied'; }\nelse {\n  // quiet hours: only text 9:00–20:00 in the company timezone\n  const now = DateTime.now().setZone(r.timezone || 'America/New_York');\n  if (now.hour < 9 || now.hour >= 20) {\n    decision = 'DEFER';\n    const next = now.hour >= 20 ? now.plus({ days: 1 }) : now;\n    defer_until = next.set({ hour: 9, minute: 5, second: 0, millisecond: 0 }).toUTC().toISO();\n  }\n}\nreturn { json: { ...r, decision, reason, defer_until } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "b4b993f6-fd10-4d8e-ae51-36eda9546a5e",
+      "name": "CHECK_STATUS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "9428d965-3250-41ea-9c39-e838490f349a",
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "SEND",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "SEND"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "77eb892f-0026-488b-a647-801bcc8521c9",
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "DEFER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "DEFER"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "ea0886f8-6abf-4c11-93fa-111b76bb738c",
+                    "leftValue": "={{ $json.decision }}",
+                    "rightValue": "SKIP",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "SKIP"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "62e25e20-c26e-4e56-99b9-76e54570fd2d",
+      "name": "ROUTE_DECISION",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE followups SET status='SKIPPED', skip_reason=$2::text WHERE id=$1::uuid RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.followup_id, $json.reason ] }}"
+        }
+      },
+      "id": "873ea825-9bd9-4790-9b7a-8b9c84524058",
+      "name": "MARK_SKIPPED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE followups SET due_at=$2::timestamptz WHERE id=$1::uuid AND status='PENDING' RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.followup_id, $json.defer_until ] }}"
+        }
+      },
+      "id": "a40550fb-24eb-4db0-92ce-50c22b00aee9",
+      "name": "DEFER_FOLLOWUP",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE followups SET status='SENT', sent_at=NOW()\nWHERE id=$1::uuid AND status='PENDING'\nRETURNING id AS followup_id, lead_id, step, type;",
+        "options": {
+          "queryReplacement": "={{ [ $json.followup_id ] }}"
+        }
+      },
+      "id": "5ed84077-14d8-4a17-bf0f-c1bd769de3fa",
+      "name": "CLAIM_FOLLOWUP",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        660
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "3fa6e585-89ff-444f-a0b1-4f0349c57856",
+              "leftValue": "={{ $json.followup_id !== undefined && $json.followup_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a18c2553-ffa9-4906-831f-1271b44fd00a",
+      "name": "CLAIM_FOLLOWUP_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $json;\nreturn { json: { lead_id: f.lead_id, organization_id: $('CHECK_STATUS').item.json.organization_id,\n  channel: $('CHECK_STATUS').item.json.preferred_channel === 'whatsapp' ? 'whatsapp' : 'sms',\n  mode: 'FOLLOWUP', step: f.step } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "8794ee6d-7471-40ab-ad09-62d2e7286b19",
+      "name": "PREP_AI_FOLLOWUP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "e67bd0d7-c578-434e-81a3-928295292f16",
+      "name": "AI_GENERATE_FOLLOWUP",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        2060,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE followups SET\n  status = CASE WHEN $2::boolean THEN 'SENT' ELSE 'FAILED' END,\n  skip_reason = CASE WHEN $2::boolean THEN NULL ELSE $3::text END\nWHERE id = $1::uuid\nRETURNING id, lead_id, status;",
+        "options": {
+          "queryReplacement": "={{ [ $('CLAIM_FOLLOWUP').item.json.followup_id, $json.sent === true, $json.reason || $json.error || 'send_failed' ] }}"
+        }
+      },
+      "id": "0eb0a487-3919-472f-8daa-8f4daace6d95",
+      "name": "UPDATE_FOLLOWUP",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, lead_id, type, description, metadata)\nSELECT organization_id, id, 'FOLLOWUP_' || $2::text, 'Follow-up step ' || $3::text, '{}'::jsonb FROM leads WHERE id = $1::uuid\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead_id, $json.status, $('CLAIM_FOLLOWUP').item.json.step ] }}"
+        }
+      },
+      "id": "e4ac0c08-66a8-4216-9cf4-98d8a760ce6d",
+      "name": "LOG_ACTIVITY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 13 · Follow-up Engine\nDefault sequence from `settings.followup_sequence_minutes`: 15 min · 4 h · 24 h · 3 d · 7 d.\nStops for BOOKED / HUMAN / STOPPED / DISQUALIFIED, skips if the customer replied, defers outside 9:00–20:00 local.\nClaim-then-send: a follow-up row is marked before sending, so overlapping runs can never double-text.",
+        "width": 600,
+        "height": 260
+      },
+      "id": "0a49441e-f536-431d-9201-78d90ac8876f",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "CLAIM_FOLLOWUP": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_FOLLOWUP_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "FIND_FOLLOWUPS_DUE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_FOLLOWUPS_DUE": {
+      "main": [
+        [
+          {
+            "node": "CHECK_STATUS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_STATUS": {
+      "main": [
+        [
+          {
+            "node": "ROUTE_DECISION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE_DECISION": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_FOLLOWUP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DEFER_FOLLOWUP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "MARK_SKIPPED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLAIM_FOLLOWUP_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "PREP_AI_FOLLOWUP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_AI_FOLLOWUP": {
+      "main": [
+        [
+          {
+            "node": "AI_GENERATE_FOLLOWUP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI_GENERATE_FOLLOWUP": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_FOLLOWUP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_FOLLOWUP": {
+      "main": [
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "13",
+    "description": "Every 5 min: due nurture/missed-call follow-ups → status + consent + quiet hours → AI message (via 06) → 07"
+  }
+}

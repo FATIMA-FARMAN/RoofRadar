@@ -1,0 +1,422 @@
+{
+  "name": "RR 15 · Human Handoff",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "ca7605f1-7fde-450a-8231-a8890c8ab206",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT to_jsonb(l.*) AS lead,\n       to_jsonb(o.*) AS org,\n       rr_can_contact(l.id, coalesce(NULLIF($2::text,''), 'sms')) AS can_contact,\n       (SELECT to_jsonb(a.*) FROM appointments a\n         WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW()\n         ORDER BY a.start_at LIMIT 1) AS upcoming_appointment\nFROM leads l JOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, 'sms' ] }}"
+        }
+      },
+      "id": "37e4e4d9-3825-482e-9e8f-2a5a059992b4",
+      "name": "GET_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM conversations\nWHERE (id = NULLIF($1::text,'')::uuid) OR (NULLIF($1::text,'') IS NULL AND lead_id = $2::uuid AND status = 'ACTIVE')\nORDER BY last_message_at DESC LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.conversation_id || '', $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "ab522156-38c7-4cc8-9a31-3e52ab8e186c",
+      "name": "GET_CONVERSATION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET human_handoff = true, status = 'HUMAN_HANDOFF',\n       urgency = CASE WHEN $2::text = 'EMERGENCY' THEN 'EMERGENCY' ELSE urgency END\nWHERE id = $1::uuid\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.priority || 'NORMAL' ] }}"
+        }
+      },
+      "id": "0b841f27-b66c-43ea-a182-8c6bea39fff2",
+      "name": "SET_HUMAN_HANDOFF",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO human_handoffs (organization_id, lead_id, conversation_id, reason, priority, channel)\nVALUES ($1::uuid, $2::uuid, NULLIF($3::text,'')::uuid, $4::text, $5::text, $6::text)\nON CONFLICT (lead_id) WHERE status = 'OPEN'\nDO UPDATE SET reason = human_handoffs.reason || ' | ' || EXCLUDED.reason,\n              priority = CASE WHEN EXCLUDED.priority = 'EMERGENCY' THEN 'EMERGENCY' ELSE human_handoffs.priority END\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id, $json.id, $('GET_CONVERSATION').first().json.id || '', $('EXECUTE_WORKFLOW_TRIGGER').first().json.reason || 'Customer requested a person', $('EXECUTE_WORKFLOW_TRIGGER').first().json.priority || 'NORMAL', $('EXECUTE_WORKFLOW_TRIGGER').first().json.channel || 'sms' ] }}"
+        }
+      },
+      "id": "2c67e0a2-4689-4927-be19-15c32d2f1bca",
+      "name": "CREATE_HANDOFF",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $('GET_LEAD').first().json.org.settings.slack_channel }}"
+        },
+        "text": "={{ ($json.priority === 'EMERGENCY' ? '🚨🚨 EMERGENCY HANDOFF' : '🚨 HUMAN HANDOFF') + '\\n\\n' + 'Lead: ' + ($('SET_HUMAN_HANDOFF').first().json.name || 'Unknown') + '\\nPhone: ' + ($('SET_HUMAN_HANDOFF').first().json.phone || 'n/a') + '\\nProblem: ' + ($('SET_HUMAN_HANDOFF').first().json.problem_type || 'n/a') + '\\nUrgency: ' + ($('SET_HUMAN_HANDOFF').first().json.urgency || 'n/a') + '\\nScore: ' + $('SET_HUMAN_HANDOFF').first().json.lead_score + '\\nChannel: ' + ($('EXECUTE_WORKFLOW_TRIGGER').first().json.channel || 'sms') + '\\n\\nReason:\\n' + ($('EXECUTE_WORKFLOW_TRIGGER').first().json.reason || 'Customer requested a person') }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "82ee0236-28e3-406e-9e33-162ab835e9ac",
+      "name": "SEND_SLACK_ALERT",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "633b5759-5bb8-4877-bd64-7fa80efe47d1",
+              "leftValue": "={{ $('EXECUTE_WORKFLOW_TRIGGER').first().json.notify_customer !== false && ['sms','whatsapp'].includes($('EXECUTE_WORKFLOW_TRIGGER').first().json.channel || 'sms') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5a43275b-442c-438f-b11f-5b06cced18e4",
+      "name": "NOTIFY_CUSTOMER?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst org = $('GET_LEAD').first().json.org;\nconst body = t.priority === 'EMERGENCY'\n  ? `We've alerted the ${org.name} emergency team and someone will call you shortly. If anyone is in danger, leave the area and call 911.`\n  : `Thanks — I've passed this to the ${org.name} team and a team member will get back to you shortly.`;\nreturn [{ json: { lead_id: t.lead_id, channel: t.channel === 'whatsapp' ? 'whatsapp' : 'sms', body, kind: 'HANDOFF', ai_generated: false } }];"
+      },
+      "id": "b1297087-9188-4894-8d3d-4b223fd42c1c",
+      "name": "PREP_CUSTOMER_CONFIRMATION",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__07__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "ee8744e3-8a72-4cef-9659-35db96f21607",
+      "name": "SEND_CUSTOMER_CONFIRMATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        2320,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH c AS (UPDATE conversations SET ai_active = false WHERE lead_id = $1::uuid AND status = 'ACTIVE' RETURNING id)\nSELECT (SELECT count(*) FROM c) AS paused_conversations, rr_cancel_followups($1::uuid, 'HUMAN_HANDOFF') AS cancelled_followups;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "e7ea5806-fbe9-4382-800b-455573587622",
+      "name": "PAUSE_AI",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, '15_HUMAN_HANDOFF', 'HANDOFF_CREATED', $3::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ $('SET_HUMAN_HANDOFF').first().json.organization_id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, JSON.stringify({reason: $('EXECUTE_WORKFLOW_TRIGGER').first().json.reason, priority: $('EXECUTE_WORKFLOW_TRIGGER').first().json.priority || 'NORMAL', channel: $('EXECUTE_WORKFLOW_TRIGGER').first().json.channel}) ] }}"
+        }
+      },
+      "id": "2e3732af-04cb-4ac3-bfce-398f9d13768d",
+      "name": "LOG_EVENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {\n  handoff: true, handoff_id: $('CREATE_HANDOFF').first().json.id,\n  priority: $('CREATE_HANDOFF').first().json.priority,\n  handoff_phone: $('GET_LEAD').first().json.org.settings.handoff_phone || null\n} }];"
+      },
+      "id": "dee83ba4-4a58-48b9-8013-48d8dea0ff14",
+      "name": "RETURN_HANDOFF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 15 · Human Handoff\nResume AI for a lead after a human is done:\n`UPDATE leads SET human_handoff=false, status='ENGAGED' WHERE id='…';`\n`UPDATE conversations SET ai_active=true WHERE lead_id='…' AND status='ACTIVE';`\n`UPDATE human_handoffs SET status='RESOLVED', resolved_at=NOW() WHERE lead_id='…' AND status='OPEN';`",
+        "width": 620,
+        "height": 260
+      },
+      "id": "3239c1a5-e59b-43b7-a963-5b0346899246",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_LEAD": {
+      "main": [
+        [
+          {
+            "node": "GET_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "SET_HUMAN_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SET_HUMAN_HANDOFF": {
+      "main": [
+        [
+          {
+            "node": "CREATE_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_HANDOFF": {
+      "main": [
+        [
+          {
+            "node": "SEND_SLACK_ALERT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_SLACK_ALERT": {
+      "main": [
+        [
+          {
+            "node": "NOTIFY_CUSTOMER?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NOTIFY_CUSTOMER?": {
+      "main": [
+        [
+          {
+            "node": "PREP_CUSTOMER_CONFIRMATION",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PAUSE_AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_CUSTOMER_CONFIRMATION": {
+      "main": [
+        [
+          {
+            "node": "SEND_CUSTOMER_CONFIRMATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_CUSTOMER_CONFIRMATION": {
+      "main": [
+        [
+          {
+            "node": "PAUSE_AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PAUSE_AI": {
+      "main": [
+        [
+          {
+            "node": "LOG_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_EVENT": {
+      "main": [
+        [
+          {
+            "node": "RETURN_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "15",
+    "description": "Flag lead, open handoff, alert Slack, tell the customer, pause AI, stop follow-ups"
+  }
+}

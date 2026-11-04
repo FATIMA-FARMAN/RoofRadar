@@ -1,0 +1,2 @@
+{ "tool": "get_available_slots", "args": { "date": "2026-09-25", "preferred_time": "14:00" },
+  "call": { "call_sid": "CAtest0001", "from": "+14155551234", "to": "+15550100000", "lead_id": "PASTE_LEAD_ID" } }

@@ -1,0 +1,10 @@
+{
+  "name": "John Smith",
+  "phone": "+14155551234",
+  "email": "john@example.com",
+  "address": "123 Main Street, Newark, NJ",
+  "problem_type": "roof leak",
+  "message": "Water is coming through my ceiling",
+  "sms_consent": true,
+  "consent_text": "I agree to receive texts from PrimeHome Roofing about my request. Msg & data rates may apply. Reply STOP to opt out."
+}

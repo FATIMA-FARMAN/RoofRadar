@@ -1,0 +1,175 @@
+{
+  "name": "RR 17 · Analytics",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "15 0 * * *"
+            }
+          ]
+        }
+      },
+      "id": "a76ed6a2-6d3d-418a-8edb-0f08cc0c3e5b",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH o AS (\n  SELECT id, timezone, ((NOW() AT TIME ZONE timezone)::date - 1) AS day FROM organizations WHERE active\n), w AS (\n  SELECT id, day, (day::timestamp AT TIME ZONE timezone) AS s, ((day + 1)::timestamp AT TIME ZONE timezone) AS e FROM o\n)\nSELECT w.id AS organization_id, to_char(w.day, 'YYYY-MM-DD') AS day,   -- text: avoids JS Date timezone shifts\n  (SELECT count(*) FROM leads l WHERE l.organization_id = w.id AND l.created_at >= w.s AND l.created_at < w.e)::int AS new_leads,\n  (SELECT count(*) FROM leads l WHERE l.organization_id = w.id AND l.created_at >= w.s AND l.created_at < w.e\n      AND l.qualification_status = 'QUALIFIED')::int AS qualified_leads,\n  (SELECT count(*) FROM appointments a WHERE a.organization_id = w.id AND a.created_at >= w.s AND a.created_at < w.e\n      AND a.rescheduled_from IS NULL)::int AS bookings,\n  (SELECT coalesce(round(avg(l.lead_score), 2), 0) FROM leads l WHERE l.organization_id = w.id\n      AND l.created_at >= w.s AND l.created_at < w.e) AS average_lead_score,\n  (SELECT count(*) FROM human_handoffs h WHERE h.organization_id = w.id AND h.created_at >= w.s AND h.created_at < w.e)::int AS human_handoffs,\n  (SELECT count(*) FROM messages m WHERE m.organization_id = w.id AND m.direction = 'OUTBOUND' AND m.created_at >= w.s AND m.created_at < w.e)::int AS response_count,\n  (SELECT count(*) FROM messages m WHERE m.organization_id = w.id AND m.direction = 'INBOUND' AND m.created_at >= w.s AND m.created_at < w.e)::int AS inbound_messages,\n  (SELECT count(*) FROM activities a WHERE a.organization_id = w.id AND a.type = 'MISSED_CALL' AND a.created_at >= w.s AND a.created_at < w.e)::int AS missed_calls,\n  (SELECT count(*) FROM followups f WHERE f.organization_id = w.id AND f.status = 'SENT' AND f.sent_at >= w.s AND f.sent_at < w.e)::int AS followup_count,\n  (SELECT count(*) FROM voice_sessions v WHERE v.organization_id = w.id AND v.started_at >= w.s AND v.started_at < w.e)::int AS voice_calls,\n  (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM fo.first_out - l.created_at))\n     FROM leads l CROSS JOIN LATERAL (SELECT min(m.created_at) AS first_out FROM messages m\n                                      WHERE m.lead_id = l.id AND m.direction = 'OUTBOUND') fo\n    WHERE l.organization_id = w.id AND l.created_at >= w.s AND l.created_at < w.e AND fo.first_out IS NOT NULL)::int\n    AS median_first_response_seconds,\n  (SELECT coalesce(jsonb_object_agg(source, n), '{}'::jsonb) FROM (\n     SELECT source, count(*) AS n FROM leads l WHERE l.organization_id = w.id AND l.created_at >= w.s AND l.created_at < w.e\n     GROUP BY source) x) AS by_source\nFROM w;",
+        "options": {}
+      },
+      "id": "d72ee990-f6d4-4cdb-a8f9-96439176f87c",
+      "name": "QUERY_DAILY_METRICS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "e06ff449-4fc5-49eb-a01b-27fea3342833",
+              "leftValue": "={{ $json.organization_id !== undefined && $json.organization_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "79d4a5e9-0dbc-478d-88e7-902868089dc5",
+      "name": "QUERY_DAILY_METRICS_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst booking_rate = r.new_leads > 0 ? Math.round((r.bookings / r.new_leads) * 10000) / 10000 : 0;\nreturn { json: { ...r, booking_rate } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "256150b4-553e-4516-99d1-5965bbfc01be",
+      "name": "CALCULATE_KPIS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_daily (organization_id, day, new_leads, qualified_leads, bookings, booking_rate, average_lead_score,\n  human_handoffs, response_count, inbound_messages, missed_calls, followup_count, voice_calls,\n  median_first_response_seconds, by_source, computed_at)\nVALUES ($1::uuid, $2::date, $3::int, $4::int, $5::int, $6::numeric, $7::numeric, $8::int, $9::int, $10::int, $11::int,\n        $12::int, $13::int, $14::int, $15::jsonb, NOW())\nON CONFLICT (organization_id, day) DO UPDATE SET\n  new_leads = EXCLUDED.new_leads, qualified_leads = EXCLUDED.qualified_leads, bookings = EXCLUDED.bookings,\n  booking_rate = EXCLUDED.booking_rate, average_lead_score = EXCLUDED.average_lead_score,\n  human_handoffs = EXCLUDED.human_handoffs, response_count = EXCLUDED.response_count,\n  inbound_messages = EXCLUDED.inbound_messages, missed_calls = EXCLUDED.missed_calls,\n  followup_count = EXCLUDED.followup_count, voice_calls = EXCLUDED.voice_calls,\n  median_first_response_seconds = EXCLUDED.median_first_response_seconds, by_source = EXCLUDED.by_source,\n  computed_at = NOW()\nRETURNING organization_id, day;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id, $json.day, $json.new_leads, $json.qualified_leads, $json.bookings, $json.booking_rate, $json.average_lead_score, $json.human_handoffs, $json.response_count, $json.inbound_messages, $json.missed_calls, $json.followup_count, $json.voice_calls, $json.median_first_response_seconds, JSON.stringify($json.by_source || {}) ] }}"
+        }
+      },
+      "id": "b0dc04c7-509c-41be-ad57-5e32f1d93d9d",
+      "name": "SAVE_ANALYTICS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "QUERY_DAILY_METRICS": {
+      "main": [
+        [
+          {
+            "node": "QUERY_DAILY_METRICS_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "QUERY_DAILY_METRICS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QUERY_DAILY_METRICS_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "CALCULATE_KPIS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CALCULATE_KPIS": {
+      "main": [
+        [
+          {
+            "node": "SAVE_ANALYTICS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "17",
+    "description": "Nightly KPI aggregation per organisation into analytics_daily"
+  }
+}

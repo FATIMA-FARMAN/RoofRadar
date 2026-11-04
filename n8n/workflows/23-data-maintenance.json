@@ -1,0 +1,374 @@
+{
+  "name": "RR 23 · Data Maintenance",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "b5b51b05-365d-4495-a57b-1eb8df246736",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH c AS (UPDATE conversations SET status = 'EXPIRED'\n           WHERE status = 'ACTIVE' AND last_message_at < NOW() - INTERVAL '30 days' RETURNING id),\n     v AS (UPDATE voice_sessions SET status = 'ABANDONED', ended_at = coalesce(ended_at, NOW())\n           WHERE status = 'IN_PROGRESS' AND started_at < NOW() - INTERVAL '3 hours' RETURNING id)\nSELECT (SELECT count(*) FROM c)::int AS expired_conversations, (SELECT count(*) FROM v)::int AS abandoned_voice_sessions;",
+        "options": {}
+      },
+      "id": "7563dcf1-8756-426a-aef2-e9981b4cecd8",
+      "name": "CLEAN_EXPIRED_SESSIONS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH a AS (DELETE FROM monitoring_checks WHERE checked_at < NOW() - INTERVAL '30 days' RETURNING 1),\n     b AS (DELETE FROM retry_queue WHERE status = 'COMPLETE' AND updated_at < NOW() - INTERVAL '30 days' RETURNING 1),\n     c AS (DELETE FROM workflow_events WHERE created_at < NOW() - INTERVAL '180 days' RETURNING 1),\n     d AS (UPDATE leads SET metadata = metadata - 'offered_slots' - 'offered_at'\n           WHERE metadata ? 'offered_at' AND (metadata->>'offered_at')::timestamptz < NOW() - INTERVAL '7 days' RETURNING 1)\nSELECT (SELECT count(*) FROM a)::int AS monitoring_rows_deleted, (SELECT count(*) FROM b)::int AS retries_deleted,\n       (SELECT count(*) FROM c)::int AS events_deleted, (SELECT count(*) FROM d)::int AS stale_offers_cleared;",
+        "options": {}
+      },
+      "id": "ca2dd010-0d57-407d-8ea0-c3ba75fd2995",
+      "name": "CLEAN_OLD_TEMP_DATA",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH m AS (UPDATE messages SET archived = true WHERE NOT archived AND created_at < NOW() - INTERVAL '365 days' RETURNING 1)\nSELECT (SELECT count(*) FROM m)::int AS archived_messages;",
+        "options": {}
+      },
+      "id": "264ad05d-fc69-4202-978e-23a3b6792e91",
+      "name": "ARCHIVE_OLD_MESSAGES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH d AS (\n  SELECT organization_id, lower(email) AS email, array_agg(id ORDER BY created_at) AS lead_ids, count(*) AS n\n  FROM leads WHERE email IS NOT NULL\n  GROUP BY organization_id, lower(email) HAVING count(*) > 1\n), flagged AS (\n  INSERT INTO workflow_events (organization_id, workflow, event, payload)\n  SELECT organization_id, '23_MAINTENANCE', 'DUPLICATE_SUSPECTED', jsonb_build_object('email', email, 'lead_ids', lead_ids)\n  FROM d\n  WHERE NOT EXISTS (SELECT 1 FROM workflow_events e WHERE e.event = 'DUPLICATE_SUSPECTED'\n                    AND e.payload->>'email' = d.email AND e.created_at > NOW() - INTERVAL '7 days')\n  RETURNING 1\n)\nSELECT (SELECT count(*) FROM d)::int AS duplicate_groups, (SELECT count(*) FROM flagged)::int AS newly_flagged;",
+        "options": {}
+      },
+      "id": "5a371e0c-45cf-4344-a266-e532e998c764",
+      "name": "CHECK_DUPLICATES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  (SELECT count(*) FROM followups f JOIN leads l ON l.id = f.lead_id\n    WHERE f.status = 'PENDING' AND l.status IN ('STOPPED','BOOKED','DISQUALIFIED'))::int AS followups_for_closed_leads,\n  (SELECT count(*) FROM appointments a JOIN leads l ON l.id = a.lead_id\n    WHERE a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW() AND l.status IN ('STOPPED','LOST'))::int AS future_appts_for_closed_leads,\n  (SELECT count(*) FROM appointments WHERE status IN ('SCHEDULED','CONFIRMED') AND external_event_id IS NULL)::int AS appts_without_calendar_event,\n  (SELECT count(*) FROM appointments WHERE status IN ('SCHEDULED','CONFIRMED') AND end_at < NOW() - INTERVAL '1 day')::int AS past_appts_not_closed,\n  (SELECT count(*) FROM human_handoffs WHERE status = 'OPEN' AND created_at < NOW() - INTERVAL '24 hours')::int AS handoffs_open_over_24h;",
+        "options": {}
+      },
+      "id": "23e1d277-6dd7-4b6a-9be5-acf6eecd6c6a",
+      "name": "CHECK_ORPHAN_RECORDS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT pg_database_size(current_database()) AS db_bytes,\n  (SELECT coalesce(jsonb_object_agg(relname, n_live_tup), '{}'::jsonb) FROM pg_stat_user_tables\n    WHERE relname IN ('leads','messages','conversations','appointments','ai_interactions','workflow_events')) AS row_counts,\n  (SELECT coalesce(max(n_dead_tup), 0) FROM pg_stat_user_tables) AS max_dead_tuples;",
+        "options": {}
+      },
+      "id": "56092d47-5c01-4bdd-8df6-f12ce51f1b48",
+      "name": "DATABASE_HEALTH",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = {};\nfor (const n of ['CLEAN_EXPIRED_SESSIONS','CLEAN_OLD_TEMP_DATA','ARCHIVE_OLD_MESSAGES','CHECK_DUPLICATES','CHECK_ORPHAN_RECORDS','DATABASE_HEALTH'])\n  Object.assign(r, $(n).first().json);\nconst anomalies = [];\nif (r.newly_flagged) anomalies.push(`${r.newly_flagged} new duplicate-lead groups (flagged, not deleted)`);\nif (r.followups_for_closed_leads) anomalies.push(`${r.followups_for_closed_leads} pending follow-ups for closed leads`);\nif (r.future_appts_for_closed_leads) anomalies.push(`${r.future_appts_for_closed_leads} future appointments for STOPPED/LOST leads`);\nif (r.appts_without_calendar_event) anomalies.push(`${r.appts_without_calendar_event} appointments without a calendar event`);\nif (r.past_appts_not_closed) anomalies.push(`${r.past_appts_not_closed} past appointments still SCHEDULED (mark COMPLETED/NO_SHOW)`);\nif (r.handoffs_open_over_24h) anomalies.push(`${r.handoffs_open_over_24h} human handoffs open > 24h`);\nreturn [{ json: { report: r, anomalies } }];"
+      },
+      "id": "bc4cb438-fa0f-4950-989b-ebe6d050137c",
+      "name": "LOG_MAINTENANCE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event(NULL, NULL, '23_MAINTENANCE', 'MAINTENANCE_RUN', $1::jsonb) AS id, (SELECT value #>> '{}' FROM app_config WHERE key = 'alert_slack_channel') AS alert_channel;",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json) ] }}"
+        }
+      },
+      "id": "35b0e43c-6b6d-438e-9fd0-8d3fb8f8f142",
+      "name": "SAVE_MAINTENANCE_LOG",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "667b49b5-ac57-4cbf-bfe0-333a52a51808",
+              "leftValue": "={{ $('LOG_MAINTENANCE').first().json.anomalies.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "38a544c7-ff3d-4ca9-b781-2d288cc9bfbb",
+      "name": "ANOMALIES?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.alert_channel || '#roofradar-alerts' }}"
+        },
+        "text": "={{ '🧹 Nightly maintenance found:\\n• ' + $('LOG_MAINTENANCE').first().json.anomalies.join('\\n• ') }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "25d4c0f4-732e-4465-ac82-9220da875b43",
+      "name": "ALERT_ANOMALIES",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "CLEAN_EXPIRED_SESSIONS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLEAN_EXPIRED_SESSIONS": {
+      "main": [
+        [
+          {
+            "node": "CLEAN_OLD_TEMP_DATA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLEAN_OLD_TEMP_DATA": {
+      "main": [
+        [
+          {
+            "node": "ARCHIVE_OLD_MESSAGES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ARCHIVE_OLD_MESSAGES": {
+      "main": [
+        [
+          {
+            "node": "CHECK_DUPLICATES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_DUPLICATES": {
+      "main": [
+        [
+          {
+            "node": "CHECK_ORPHAN_RECORDS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_ORPHAN_RECORDS": {
+      "main": [
+        [
+          {
+            "node": "DATABASE_HEALTH",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DATABASE_HEALTH": {
+      "main": [
+        [
+          {
+            "node": "LOG_MAINTENANCE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_MAINTENANCE": {
+      "main": [
+        [
+          {
+            "node": "SAVE_MAINTENANCE_LOG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_MAINTENANCE_LOG": {
+      "main": [
+        [
+          {
+            "node": "ANOMALIES?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ANOMALIES?": {
+      "main": [
+        [
+          {
+            "node": "ALERT_ANOMALIES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "23",
+    "description": "02:00 daily: expire sessions, prune temp data, archive, flag duplicates & orphans, DB health"
+  }
+}

@@ -1,0 +1,300 @@
+{
+  "name": "RR 26 · Lead Re-engagement",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 11 * * *"
+            }
+          ]
+        }
+      },
+      "id": "1703cf69-43a6-45f3-ae29-a1914ad75e1c",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS lead_id, l.organization_id\nFROM leads l\nJOIN organizations o ON o.id = l.organization_id\nWHERE o.active\n  AND coalesce((o.settings->'reengagement'->>'enabled')::boolean, true)\n  AND l.status IN ('CONTACTED','ENGAGED','QUALIFIED')\n  AND NOT l.human_handoff AND l.phone IS NOT NULL\n  AND coalesce(l.last_message_at, l.created_at) < NOW() - INTERVAL '30 days'\n  AND coalesce(l.last_message_at, l.created_at) > NOW() - INTERVAL '180 days'\n  AND (l.metadata->>'reengaged_at' IS NULL OR (l.metadata->>'reengaged_at')::timestamptz < NOW() - INTERVAL '90 days')\n  AND NOT EXISTS (SELECT 1 FROM followups f WHERE f.lead_id = l.id AND f.status = 'PENDING')\n  AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.lead_id = l.id\n                  AND a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW())\n  AND rr_can_contact(l.id, 'sms')\nORDER BY l.lead_score DESC\nLIMIT 20;",
+        "options": {}
+      },
+      "id": "940f6813-6740-473a-ace0-482d6331454b",
+      "name": "FIND_QUIET_LEADS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "4648951d-546d-4a3a-9a69-453b3c9cec1f",
+              "leftValue": "={{ $json.lead_id !== undefined && $json.lead_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0f6ac55-e944-4118-a3da-869abc6d945a",
+      "name": "FIND_QUIET_LEADS_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET metadata = metadata || jsonb_build_object('reengaged_at', NOW())\nWHERE id = $1::uuid\n  AND (metadata->>'reengaged_at' IS NULL OR (metadata->>'reengaged_at')::timestamptz < NOW() - INTERVAL '90 days')\nRETURNING id AS lead_id, organization_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead_id ] }}"
+        }
+      },
+      "id": "304c1de3-fb42-42ef-a81b-1cf0c744ba5b",
+      "name": "CLAIM_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "f70aebee-7aa6-4b5b-9ed2-ae141bb51ea7",
+              "leftValue": "={{ $json.lead_id !== undefined && $json.lead_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bacf7c73-e072-4fcc-a51e-5861fb87c761",
+      "name": "CLAIM_LEAD_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: { lead_id: $json.lead_id, organization_id: $json.organization_id, channel: 'sms', mode: 'REENGAGE' } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "06dba886-06b7-4347-bd86-267234965261",
+      "name": "PREP_CHECK_IN",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "7b5a6a14-478e-4c21-85ae-460313a96f51",
+      "name": "EXECUTE_06_AI_CONVERSATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1800,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, lead_id, type, description, metadata)\nVALUES ($1::uuid, $2::uuid, 'REENGAGEMENT', 'Check-in text to quiet lead', $3::jsonb)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('CLAIM_LEAD').item.json.organization_id, $('CLAIM_LEAD').item.json.lead_id, JSON.stringify({sent: $json.sent === true}) ] }}"
+        }
+      },
+      "id": "391c3954-9492-4546-bb74-ecddd0e36583",
+      "name": "LOG_ACTIVITY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 26 · Lead Re-engagement\nOne friendly check-in to leads quiet for 30+ days (never older than 180 days), only if they're still reachable,\nnot booked, not handed to a person and have no follow-ups pending. At most once every 90 days per lead.\nTurn off per client with `settings.reengagement.enabled = false`.",
+        "width": 620,
+        "height": 260
+      },
+      "id": "8b3ba41b-25eb-40e1-b891-bb423a613860",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "FIND_QUIET_LEADS": {
+      "main": [
+        [
+          {
+            "node": "FIND_QUIET_LEADS_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLAIM_LEAD": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_LEAD_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "FIND_QUIET_LEADS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_QUIET_LEADS_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLAIM_LEAD_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "PREP_CHECK_IN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_CHECK_IN": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_06_AI_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "26",
+    "description": "Daily 11:00: quiet leads (30–180 days, never booked, still reachable) → one check-in text (06), at most every 90 days"
+  }
+}

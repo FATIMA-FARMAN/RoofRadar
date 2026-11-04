@@ -1,0 +1,458 @@
+{
+  "name": "RR 20 · Retry Queue",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "34947559-2f82-4c86-aa53-676009b9b101",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE retry_queue SET status = 'PROCESSING', attempts = attempts + 1\nWHERE id IN (\n  SELECT id FROM retry_queue\n  WHERE status = 'PENDING' AND next_attempt_at <= NOW()\n  ORDER BY next_attempt_at\n  LIMIT 5\n  FOR UPDATE SKIP LOCKED)\nRETURNING *, (SELECT value #>> '{}' FROM app_config WHERE key = 'n8n_base_url') AS n8n_base_url;",
+        "options": {}
+      },
+      "id": "51febc1d-d638-4601-a9c4-990bf3c8514d",
+      "name": "GET_DUE_RETRIES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cd558e25-9964-4195-a9c9-22895ab8ec60",
+              "leftValue": "={{ $json.id !== undefined && $json.id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3f19314e-cd2e-45e3-8709-1851343a2b46",
+      "name": "GET_DUE_RETRIES_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst base = String(r.n8n_base_url || '').replace(/\\/+$/, '');\nif (!base) throw new Error('VALIDATION: app_config.n8n_base_url is not set');\nreturn { json: { queue_id: r.id, attempts: r.attempts, max_attempts: r.max_attempts,\n                 url: `${base}/api/v1/executions/${r.payload.execution_id}/retry`,\n                 execution_id: r.payload.execution_id, workflow_name: r.workflow_name } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "4625561f-ecbd-49ed-9d33-eead69b25a4b",
+      "name": "PROCESS_ONE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ loadWorkflow: true }) }}"
+      },
+      "id": "2063e45b-16b0-4a66-aa20-8dd6e27059ec",
+      "name": "EXECUTE_OPERATION",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__CRED_N8N_API_ID__",
+          "name": "RoofRadar n8n API"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "29257c1b-d5bc-4fd4-8290-29d219ccc073",
+              "leftValue": "={{ $json.statusCode >= 200 && $json.statusCode < 300 && ['success'].includes(($json.body || {}).status) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a9beb1cb-d39d-430d-8f48-a323eac45314",
+      "name": "SUCCESS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE retry_queue SET status = 'COMPLETE', last_error = NULL WHERE id = $1::uuid RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('PROCESS_ONE').item.json.queue_id ] }}"
+        }
+      },
+      "id": "f8c1233f-9fba-4ea4-8004-5718c8077719",
+      "name": "MARK_COMPLETE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE retry_queue SET status = 'PENDING', last_error = $2::text\nWHERE id = $1::uuid\nRETURNING id, attempts, max_attempts, workflow_name, payload;",
+        "options": {
+          "queryReplacement": "={{ [ $('PROCESS_ONE').item.json.queue_id, String(($json.body && ($json.body.status || $json.body.message)) || $json.statusCode || $json.error || 'unknown').slice(0, 500) ] }}"
+        }
+      },
+      "id": "ffde9285-4723-4c2b-907e-91cfed4904d1",
+      "name": "INCREMENT_ATTEMPT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "853eb2fa-cc2f-416f-aba7-bc4849f0a6d1",
+              "leftValue": "={{ $json.attempts >= $json.max_attempts }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "fc43164e-983e-45ec-b911-b5a3065cd644",
+      "name": "ATTEMPTS >= 3?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE retry_queue SET status = 'DEAD_LETTER' WHERE id = $1::uuid\nRETURNING id, workflow_name, payload, last_error, (SELECT value #>> '{}' FROM app_config WHERE key = 'alert_slack_channel') AS alert_channel;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id ] }}"
+        }
+      },
+      "id": "b557b603-c4e0-4148-b0ab-02dbf3d0c6bf",
+      "name": "DEAD_LETTER",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.alert_channel || '#roofradar-alerts' }}"
+        },
+        "text": "={{ '☠️ DEAD LETTER after 3 retries\\nWorkflow: ' + $json.workflow_name + '\\nExecution: ' + $json.payload.execution_id + '\\nLast error: ' + $json.last_error }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "6a8f0216-8493-4847-8714-633b579254d7",
+      "name": "ALERT_DEAD_LETTER",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE retry_queue\nSET next_attempt_at = NOW() + CASE attempts WHEN 1 THEN INTERVAL '5 minutes' ELSE INTERVAL '30 minutes' END\nWHERE id = $1::uuid RETURNING id, next_attempt_at;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id ] }}"
+        }
+      },
+      "id": "006ea542-5868-4976-8401-3bdcf16c493f",
+      "name": "CALCULATE_BACKOFF",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 20 · Retry Queue\nBackoff: 1st retry +1 min (set by 19) · 2nd +5 min · 3rd +30 min → DEAD_LETTER + Slack.\nUses the n8n public API `POST /executions/{id}/retry` (credential **RoofRadar n8n API**), which resumes from the failed\nnode — upstream side effects (a sent SMS, a created event) are not repeated.",
+        "width": 600,
+        "height": 260
+      },
+      "id": "18cf925c-cf29-4b98-85ae-791f88b19c1e",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "GET_DUE_RETRIES": {
+      "main": [
+        [
+          {
+            "node": "GET_DUE_RETRIES_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_DUE_RETRIES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_DUE_RETRIES_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "PROCESS_ONE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PROCESS_ONE": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_OPERATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_OPERATION": {
+      "main": [
+        [
+          {
+            "node": "SUCCESS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SUCCESS?": {
+      "main": [
+        [
+          {
+            "node": "MARK_COMPLETE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "INCREMENT_ATTEMPT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "INCREMENT_ATTEMPT": {
+      "main": [
+        [
+          {
+            "node": "ATTEMPTS >= 3?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ATTEMPTS >= 3?": {
+      "main": [
+        [
+          {
+            "node": "DEAD_LETTER",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CALCULATE_BACKOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DEAD_LETTER": {
+      "main": [
+        [
+          {
+            "node": "ALERT_DEAD_LETTER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "20",
+    "description": "Every minute: due retries → n8n API re-runs the failed execution from the failed node → backoff 1/5/30 min → dead letter"
+  }
+}

@@ -1,0 +1,368 @@
+{
+  "name": "RR 09 · Booking Availability",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "156c9e38-0b51-4b9a-b21b-f2ef9925ce4e",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM leads WHERE id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "8b704228-dc7c-47d0-88ba-fb184049b767",
+      "name": "GET_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, timezone, settings FROM organizations WHERE id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id ] }}"
+        }
+      },
+      "id": "bc811b78-560c-4209-8714-e6666d0529b4",
+      "name": "GET_COMPANY_RULES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const org = $('GET_COMPANY_RULES').first().json;\nconst s = org.settings || {};\nconst bh = s.business_hours || {};\nreturn [{ json: {\n  tz: org.timezone || 'America/New_York',\n  calendar_id: s.calendar_id || 'primary',\n  open: bh.start || '08:00', close: bh.end || '17:00',\n  days: bh.days || [1,2,3,4,5],\n  slot_minutes: s.slot_minutes || 60,\n  step_minutes: s.slot_step_minutes || s.slot_minutes || 60,\n  min_notice_minutes: s.min_notice_minutes ?? 120,\n  horizon_days: s.booking_horizon_days || 7,\n  max_slots: s.max_slots_offered || 3\n}}];"
+      },
+      "id": "07f8332f-333d-421e-a814-9fc09a2d05aa",
+      "name": "GET_CALENDAR_SETTINGS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst c = $json;\nconst now = DateTime.now().setZone(c.tz);\nconst earliest = now.plus({ minutes: c.min_notice_minutes });\nlet start = earliest, end = now.plus({ days: c.horizon_days }).endOf('day');\nif (t.preferred_date && /^\\d{4}-\\d{2}-\\d{2}$/.test(t.preferred_date)) {\n  const d = DateTime.fromISO(t.preferred_date, { zone: c.tz });\n  if (d.isValid && d.endOf('day') > earliest) {\n    start = DateTime.max(d.startOf('day'), earliest);\n    end = d.endOf('day');\n  }\n}\nreturn [{ json: { ...c, window_start: start.toISO(), window_end: end.toISO(),\n                  preferred_date: t.preferred_date || null, preferred_time: t.preferred_time || null } }];"
+      },
+      "id": "1588cdc2-9f5a-4165-9e4d-fff43ee40dc6",
+      "name": "CALCULATE_REQUESTED_WINDOW",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/calendar/v3/freeBusy",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ timeMin: DateTime.fromISO($json.window_start).toUTC().toISO(), timeMax: DateTime.fromISO($json.window_end).toUTC().toISO(), timeZone: $json.tz, items: [{ id: $json.calendar_id }] }) }}"
+      },
+      "id": "a6744dc4-33c5-4ed2-9862-6a16f28c005a",
+      "name": "GOOGLE_CALENDAR_FREEBUSY",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "__CRED_GCAL_ID__",
+          "name": "RoofRadar Google Calendar"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT coalesce(jsonb_agg(jsonb_build_object('start', start_at, 'end', end_at)), '[]'::jsonb) AS busy\nFROM appointments\nWHERE organization_id = $1::uuid AND status IN ('SCHEDULED','CONFIRMED')\n  AND start_at < $3::timestamptz AND end_at > $2::timestamptz;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_COMPANY_RULES').first().json.id, $('CALCULATE_REQUESTED_WINDOW').first().json.window_start, $('CALCULATE_REQUESTED_WINDOW').first().json.window_end ] }}"
+        }
+      },
+      "id": "282150ff-f6f7-4f5b-b3d7-257464b4d18b",
+      "name": "GET_BOOKED_APPOINTMENTS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('CALCULATE_REQUESTED_WINDOW').first().json;\nconst ws = DateTime.fromISO(c.window_start, { zone: c.tz });\nconst we = DateTime.fromISO(c.window_end, { zone: c.tz });\nconst [oh, om] = c.open.split(':').map(Number);\nconst [ch, cm] = c.close.split(':').map(Number);\nconst candidates = [];\nfor (let day = ws.startOf('day'); day <= we; day = day.plus({ days: 1 })) {\n  if (!c.days.includes(day.weekday)) continue;               // luxon: 1 = Monday … 7 = Sunday\n  const open = day.set({ hour: oh, minute: om });\n  const close = day.set({ hour: ch, minute: cm });\n  for (let s = open; s.plus({ minutes: c.slot_minutes }) <= close; s = s.plus({ minutes: c.step_minutes })) {\n    if (s < ws || s > we) continue;\n    candidates.push({ start: s.toISO(), end: s.plus({ minutes: c.slot_minutes }).toISO() });\n  }\n}\nreturn [{ json: { candidates } }];"
+      },
+      "id": "f9843df9-b9e2-417e-a821-22fdec194fae",
+      "name": "GENERATE_SLOTS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('CALCULATE_REQUESTED_WINDOW').first().json;\nconst fb = $('GOOGLE_CALENDAR_FREEBUSY').first().json;\nconst calKey = Object.keys(fb.calendars || {})[0];\nconst cal = (fb.calendars || {})[calKey] || {};\nif (cal.errors && cal.errors.length) throw new Error('CALENDAR: freeBusy error ' + JSON.stringify(cal.errors));\nconst busy = [...(cal.busy || []), ...($('GET_BOOKED_APPOINTMENTS').first().json.busy || [])]\n  .map(b => [new Date(b.start).getTime(), new Date(b.end).getTime()]);\nconst free = $json.candidates.filter(s => {\n  const a = new Date(s.start).getTime(), b = new Date(s.end).getTime();\n  return !busy.some(([x, y]) => a < y && b > x);\n});\nreturn [{ json: { free, busy_count: busy.length } }];"
+      },
+      "id": "b9ad03e9-a3e4-42b6-9fa0-4ce1e149b4db",
+      "name": "REMOVE_CONFLICTS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('CALCULATE_REQUESTED_WINDOW').first().json;\nconst earliest = DateTime.now().setZone(c.tz).plus({ minutes: c.min_notice_minutes });\nlet slots = $json.free\n  .map(s => ({ ...s, dt: DateTime.fromISO(s.start, { zone: c.tz }) }))\n  .filter(s => s.dt >= earliest && c.days.includes(s.dt.weekday));\nif (c.preferred_time) {\n  const [ph, pm] = c.preferred_time.split(':').map(Number);\n  const target = ph * 60 + pm;\n  slots.sort((a, b) => (Math.abs(a.dt.hour * 60 + a.dt.minute - target) - Math.abs(b.dt.hour * 60 + b.dt.minute - target)) || (a.dt - b.dt));\n} else {\n  // spread choices: at most 2 per day, earliest first\n  const perDay = {};\n  slots = slots.filter(s => { const k = s.dt.toISODate(); perDay[k] = (perDay[k] || 0) + 1; return perDay[k] <= 2; });\n}\nconst out = slots.slice(0, c.max_slots).sort((a, b) => a.dt - b.dt).map(s => ({\n  iso: s.dt.toISO({ suppressMilliseconds: true }),\n  end_iso: DateTime.fromISO(s.end, { zone: c.tz }).toISO({ suppressMilliseconds: true }),\n  label: s.dt.toFormat(\"ccc LLL d, h:mm a\")\n}));\nreturn [{ json: { available_slots: out } }];"
+      },
+      "id": "a5b99a43-358d-49a1-968c-34d5027cef4b",
+      "name": "CHECK_BUSINESS_HOURS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET metadata = metadata || jsonb_build_object('offered_slots', $2::jsonb, 'offered_at', NOW())\nWHERE id = $1::uuid\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, JSON.stringify($json.available_slots) ] }}"
+        }
+      },
+      "id": "ae462428-48a0-47c0-acec-10972dad5ef9",
+      "name": "SAVE_OFFERED_SLOTS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const s = $('CHECK_BUSINESS_HOURS').first().json.available_slots;\nconst c = $('CALCULATE_REQUESTED_WINDOW').first().json;\nreturn [{ json: { available: s.length > 0, available_slots: s, timezone: c.tz,\n                  window_start: c.window_start, window_end: c.window_end } }];"
+      },
+      "id": "f34904c0-8fff-4296-b539-093752735c03",
+      "name": "RETURN_AVAILABLE_SLOTS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 09 · Availability — never ask the AI what's free\nGoogle `freeBusy` + our own active appointments → candidate slots inside business hours,\nmin-notice and horizon (all from `organizations.settings`) → at most 3 options.\nThe options are saved on the lead (`metadata.offered_slots`) so 04/10 can verify the customer picked a real one.",
+        "width": 600,
+        "height": 260
+      },
+      "id": "8aea13ac-b8a3-49fc-a13a-3d8a5009da22",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_LEAD": {
+      "main": [
+        [
+          {
+            "node": "GET_COMPANY_RULES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_COMPANY_RULES": {
+      "main": [
+        [
+          {
+            "node": "GET_CALENDAR_SETTINGS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_CALENDAR_SETTINGS": {
+      "main": [
+        [
+          {
+            "node": "CALCULATE_REQUESTED_WINDOW",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CALCULATE_REQUESTED_WINDOW": {
+      "main": [
+        [
+          {
+            "node": "GOOGLE_CALENDAR_FREEBUSY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GOOGLE_CALENDAR_FREEBUSY": {
+      "main": [
+        [
+          {
+            "node": "GET_BOOKED_APPOINTMENTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_BOOKED_APPOINTMENTS": {
+      "main": [
+        [
+          {
+            "node": "GENERATE_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GENERATE_SLOTS": {
+      "main": [
+        [
+          {
+            "node": "REMOVE_CONFLICTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "REMOVE_CONFLICTS": {
+      "main": [
+        [
+          {
+            "node": "CHECK_BUSINESS_HOURS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_BUSINESS_HOURS": {
+      "main": [
+        [
+          {
+            "node": "SAVE_OFFERED_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_OFFERED_SLOTS": {
+      "main": [
+        [
+          {
+            "node": "RETURN_AVAILABLE_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "09",
+    "description": "Google Calendar free/busy → n8n slot maths → AI may only present the slots returned here"
+  }
+}

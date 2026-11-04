@@ -1,0 +1,382 @@
+{
+  "name": "RR 22 · Monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "7531b643-fdc0-4eb2-8134-86ef7c2b2ae9",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  (SELECT count(*) FROM errors WHERE created_at > NOW() - INTERVAL '15 minutes')::int AS errors_15m,\n  (SELECT count(*) FROM errors WHERE created_at > NOW() - INTERVAL '15 minutes' AND category = 'AUTHENTICATION')::int AS auth_errors_15m,\n  (SELECT count(*) FROM retry_queue WHERE status = 'DEAD_LETTER' AND updated_at > NOW() - INTERVAL '24 hours')::int AS dead_letters_24h,\n  (SELECT count(*) FROM retry_queue WHERE status = 'PENDING')::int AS retries_pending;",
+        "options": {}
+      },
+      "id": "81be83f5-a2c0-4f3c-9cdb-7a6b8edee2af",
+      "name": "CHECK_WORKFLOW_FAILURES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://status.twilio.com/api/v2/status.json",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "3a456307-db0a-407b-b6f6-e1ca19673222",
+      "name": "CHECK_TWILIO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        760,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 1 AS ok, pg_database_size(current_database()) AS db_bytes,\n  (SELECT count(*) FROM pg_stat_activity)::int AS connections,\n  (SELECT count(*) FROM messages WHERE direction = 'OUTBOUND' AND created_at > NOW() - INTERVAL '1 hour'\n      AND delivery_status IN ('failed','undelivered'))::int AS failed_sms_1h,\n  (SELECT count(*) FROM human_handoffs WHERE status = 'OPEN' AND created_at < NOW() - INTERVAL '2 hours')::int AS stale_handoffs;",
+        "options": {}
+      },
+      "id": "26a174e1-d4ec-4ea8-bb2f-f59bdf4d71fe",
+      "name": "CHECK_DATABASE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "maxResults",
+              "value": "1"
+            }
+          ]
+        }
+      },
+      "id": "28777c01-727e-4142-a69e-0bc208508825",
+      "name": "CHECK_CALENDAR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "__CRED_GCAL_ID__",
+          "name": "RoofRadar Google Calendar"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.openai.com/v1/models",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi"
+      },
+      "id": "8394493a-44cb-48b4-852e-57078a8aab93",
+      "name": "CHECK_CREDENTIALS_API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "__CRED_OPENAI_ID__",
+          "name": "RoofRadar OpenAI"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const get = n => { try { return $(n).first().json; } catch (e) { return { error: String(e) }; } };\nconst wf = get('CHECK_WORKFLOW_FAILURES'), tw = get('CHECK_TWILIO'), db = get('CHECK_DATABASE'),\n      cal = get('CHECK_CALENDAR'), oa = get('CHECK_CREDENTIALS_API');\nconst http = (r, name) => {\n  if (r.error) return ['CRITICAL', `${name}: ${String(r.error.message || r.error).slice(0, 200)}`];\n  const c = Number(r.statusCode || 0);\n  if (c >= 200 && c < 300) return ['HEALTHY', `${name}: HTTP ${c}`];\n  if (c === 401 || c === 403) return ['CRITICAL', `${name}: credentials rejected (HTTP ${c})`];\n  if (c === 429) return ['WARNING', `${name}: rate limited`];\n  return ['CRITICAL', `${name}: HTTP ${c || 'no response'}`];\n};\nconst rows = [];\n// Twilio: public status page + our own delivery failures\nlet [ts, td] = http(tw, 'Twilio status page');\nconst ind = tw.body?.status?.indicator;\nif (ts === 'HEALTHY' && ind && ind !== 'none') { ts = ind === 'minor' ? 'WARNING' : 'CRITICAL'; td = 'Twilio incident: ' + tw.body.status.description; }\nif (ts === 'HEALTHY' && (db.failed_sms_1h || 0) >= 5) { ts = 'WARNING'; td = `${db.failed_sms_1h} failed SMS in the last hour`; }\nrows.push({ component: 'TWILIO', status: ts, detail: td });\nrows.push(db.ok === 1\n  ? { component: 'DATABASE', status: (db.stale_handoffs || 0) > 0 ? 'WARNING' : 'HEALTHY',\n      detail: `${db.connections} connections, ${(db.db_bytes / 1048576).toFixed(1)} MB` + ((db.stale_handoffs || 0) ? `, ${db.stale_handoffs} handoffs open > 2h` : '') }\n  : { component: 'DATABASE', status: 'CRITICAL', detail: String(db.error?.message || db.error || 'query failed') });\nconst [cs, cd] = http(cal, 'Google Calendar'); rows.push({ component: 'CALENDAR', status: cs, detail: cd });\nconst [os, od] = http(oa, 'OpenAI'); rows.push({ component: 'OPENAI', status: os, detail: od });\nlet wstat = 'HEALTHY';\nif ((wf.auth_errors_15m || 0) > 0 || (wf.errors_15m || 0) >= 10) wstat = 'CRITICAL';\nelse if ((wf.errors_15m || 0) > 0 || (wf.dead_letters_24h || 0) > 0) wstat = 'WARNING';\nrows.push({ component: 'WORKFLOWS', status: wstat,\n            detail: `${wf.errors_15m ?? '?'} errors/15m, ${wf.dead_letters_24h ?? '?'} dead letters/24h, ${wf.retries_pending ?? '?'} retries pending` });\nconst rank = { HEALTHY: 0, WARNING: 1, CRITICAL: 2 };\nconst overall = rows.reduce((a, r) => rank[r.status] > rank[a] ? r.status : a, 'HEALTHY');\nreturn [{ json: { rows, overall } }];"
+      },
+      "id": "45ed0457-0db5-486a-b104-ff258c896d98",
+      "name": "CALCULATE_HEALTH",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH run AS (SELECT gen_random_uuid() AS run_id),\nprev AS (\n  SELECT coalesce(max(CASE status WHEN 'CRITICAL' THEN 2 WHEN 'WARNING' THEN 1 ELSE 0 END), 0) AS lvl\n  FROM monitoring_checks\n  WHERE run_id = (SELECT run_id FROM monitoring_checks ORDER BY checked_at DESC LIMIT 1)\n), ins AS (\n  INSERT INTO monitoring_checks (run_id, component, status, detail)\n  SELECT (SELECT run_id FROM run), r.component, r.status, r.detail\n  FROM jsonb_to_recordset($1::jsonb) AS r(component text, status text, detail text)\n  RETURNING 1\n)\nSELECT (SELECT count(*) FROM ins) AS saved,\n       CASE (SELECT lvl FROM prev) WHEN 2 THEN 'CRITICAL' WHEN 1 THEN 'WARNING' ELSE 'HEALTHY' END AS previous_overall,\n       $2::text AS overall, (SELECT value #>> '{}' FROM app_config WHERE key = 'alert_slack_channel') AS alert_channel;",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows), $json.overall ] }}"
+        }
+      },
+      "id": "70227110-a98b-40e2-bbcb-ff7d2bd4db61",
+      "name": "SAVE_MONITORING_RESULT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "2ec8b006-852a-4c58-bdad-339b554996a3",
+              "leftValue": "={{ $json.overall !== $json.previous_overall }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3859cf55-74d8-44f2-81b9-e8fe32e02396",
+      "name": "ALERT_IF_FAILURE",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.alert_channel || '#roofradar-alerts' }}"
+        },
+        "text": "={{ ($json.overall === 'HEALTHY' ? '✅ RoofRadar recovered — all systems HEALTHY' : ($json.overall === 'CRITICAL' ? '🔴' : '🟠') + ' RoofRadar health: ' + $json.overall) + '\\n' + $('CALCULATE_HEALTH').first().json.rows.map(r => (r.status === 'HEALTHY' ? '🟢' : r.status === 'WARNING' ? '🟠' : '🔴') + ' ' + r.component.padEnd(10) + ' ' + r.status + ' — ' + r.detail).join('\\n') }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "678764cd-eb17-4e52-899c-f57eb77f50a8",
+      "name": "SEND_HEALTH_ALERT",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "CHECK_WORKFLOW_FAILURES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_WORKFLOW_FAILURES": {
+      "main": [
+        [
+          {
+            "node": "CHECK_TWILIO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_TWILIO": {
+      "main": [
+        [
+          {
+            "node": "CHECK_DATABASE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_DATABASE": {
+      "main": [
+        [
+          {
+            "node": "CHECK_CALENDAR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_CALENDAR": {
+      "main": [
+        [
+          {
+            "node": "CHECK_CREDENTIALS_API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_CREDENTIALS_API": {
+      "main": [
+        [
+          {
+            "node": "CALCULATE_HEALTH",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CALCULATE_HEALTH": {
+      "main": [
+        [
+          {
+            "node": "SAVE_MONITORING_RESULT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_MONITORING_RESULT": {
+      "main": [
+        [
+          {
+            "node": "ALERT_IF_FAILURE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ALERT_IF_FAILURE": {
+      "main": [
+        [
+          {
+            "node": "SEND_HEALTH_ALERT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "22",
+    "description": "Every 5 min health check: workflows, Twilio, database, calendar, OpenAI → alert on change"
+  }
+}

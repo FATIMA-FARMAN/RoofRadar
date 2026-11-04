@@ -1,0 +1,452 @@
+{
+  "name": "RR 14 · Missed Call Recovery",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "roofradar/call-status",
+        "options": {},
+        "responseMode": "responseNode",
+        "authentication": "basicAuth"
+      },
+      "id": "655eb9c4-0669-4c38-b28d-e3e089c93910",
+      "name": "TWILIO_CALL_STATUS_WEBHOOK",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "__CRED_TWILIO_HOOK_ID__",
+          "name": "RoofRadar Twilio Webhook Auth"
+        }
+      },
+      "webhookId": "0bd55ae4-4811-4cb8-8f6f-6d6c77b1ea49"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ ($json.body.DialCallStatus && $json.body.DialCallStatus !== 'completed') ? '<Response><Say>Sorry we missed your call. We will text you right away.</Say><Hangup/></Response>' : '<Response></Response>' }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "1325a5d3-c967-4d7f-96ad-5b445cf993a6",
+      "name": "RESPOND_TWIML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// E.164 normaliser. Assumes US/Canada (+1) when a bare 10/11-digit number arrives.\nfunction normalizePhone(phone) {\n  if (!phone) return null;\n  let p = String(phone).trim().replace(/^whatsapp:/i, '').replace(/[^\\d+]/g, '');\n  if (p.startsWith('00')) p = '+' + p.substring(2);\n  if (!p.startsWith('+') && p.length === 10) p = '+1' + p;\n  if (!p.startsWith('+') && p.length === 11 && p.startsWith('1')) p = '+' + p;\n  return /^\\+[1-9]\\d{7,14}$/.test(p) ? p : null;\n}\n\nconst b = $json.body ?? $json;\nconst status = String(b.DialCallStatus || b.CallStatus || '').toLowerCase();\nreturn [{ json: {\n  call_sid: b.CallSid, phone_e164: normalizePhone(b.From), business_phone: normalizePhone(b.To),\n  status, direction: b.Direction || 'inbound', duration: Number(b.CallDuration || b.DialCallDuration || 0)\n}}];"
+      },
+      "id": "f01e0661-c157-4cdf-a0f7-51a7818d58ac",
+      "name": "NORMALIZE_CALL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const missedStates = ['no-answer', 'busy', 'failed', 'canceled'];\nconst inbound = String($json.direction).startsWith('inbound');\nreturn [{ json: { ...$json, missed: inbound && missedStates.includes($json.status) && !!$json.phone_e164 } }];"
+      },
+      "id": "9208bfa3-3b49-4706-99bd-9f62e161fa0b",
+      "name": "CHECK_STATUS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, settings FROM organizations WHERE business_phone = $1::text AND active LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.business_phone ] }}"
+        }
+      },
+      "id": "6f34f2e9-58cb-4374-a12a-9f3efde7987a",
+      "name": "RESOLVE_ORG",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "1590be54-3b57-4b42-97c4-4cf0bf23baa5",
+              "leftValue": "={{ $('CHECK_STATUS').first().json.missed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "672f546f-f187-42d0-8b88-b527d14baff4",
+      "name": "MISSED?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, type, description, metadata)\nVALUES ($1::uuid, 'CALL', $2::text, $3::jsonb) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, 'Call ' + $('CHECK_STATUS').first().json.status, JSON.stringify({call_sid: $('CHECK_STATUS').first().json.call_sid, from: $('CHECK_STATUS').first().json.phone_e164, duration: $('CHECK_STATUS').first().json.duration}) ] }}"
+        }
+      },
+      "id": "366ac996-e39e-4200-82e0-89e463f98310",
+      "name": "LOG_CALL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH l AS (\n  INSERT INTO leads (organization_id, phone, source, status)\n  VALUES ($1::uuid, $2::text, 'missed_call', 'NEW')\n  ON CONFLICT (organization_id, phone) WHERE phone IS NOT NULL DO UPDATE SET updated_at = NOW()\n  RETURNING *\n), claim AS (   -- claim the CallSid first: a duplicate Twilio callback can never text twice\n  INSERT INTO activities (organization_id, lead_id, type, description, metadata)\n  SELECT l.organization_id, l.id, 'MISSED_CALL', 'Missed call', jsonb_build_object('call_sid', $3::text, 'status', $4::text)\n  FROM l\n  ON CONFLICT ((metadata->>'call_sid')) WHERE type = 'MISSED_CALL' DO NOTHING\n  RETURNING id\n)\nSELECT l.id AS lead_id, l.name, l.status, l.organization_id, (SELECT id FROM claim) AS activity_id,\n       NOT EXISTS (SELECT 1 FROM claim) AS already_handled,\n       -- rr_can_contact() can't see a row inserted by this same statement, so check the CTE row directly\n       (l.status NOT IN ('STOPPED','BOOKED','HUMAN_HANDOFF') AND COALESCE((SELECT c.consent_status <> 'OPTED_OUT' FROM consents c\n                  WHERE c.lead_id = l.id AND c.channel IN ('sms','all') ORDER BY c.captured_at DESC LIMIT 1), true)) AS can_contact\nFROM l;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').first().json.id, $('CHECK_STATUS').first().json.phone_e164, $('CHECK_STATUS').first().json.call_sid, $('CHECK_STATUS').first().json.status ] }}"
+        }
+      },
+      "id": "cb7cf514-248b-4f42-b684-8998c406e68b",
+      "name": "FIND_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "22bcb398-8b48-4575-81a2-9deb5c989005",
+              "leftValue": "={{ $json.can_contact && !$json.already_handled }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "df1c650d-ba1c-4190-9975-fac4c531642e",
+      "name": "CHECK_CONSENT",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const org = $('RESOLVE_ORG').first().json;\nconst first = ($json.name || '').split(' ')[0];\nconst body = `Hi${first ? ' ' + first : ''}, this is ${org.name}. We missed your call. How can we help with your roofing needs? Reply STOP to opt out.`;\nreturn [{ json: { lead_id: $json.lead_id, channel: 'sms', body, kind: 'MISSED_CALL', ai_generated: false } }];"
+      },
+      "id": "9c520203-cee6-46e5-ad41-86b144e09e99",
+      "name": "PREP_SMS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__07__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "2f555c21-8e86-4761-893a-37fefe621163",
+      "name": "SEND_SMS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        2580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_schedule_nurture($1::uuid, NOW(), 2) AS scheduled;",
+        "options": {
+          "queryReplacement": "={{ [ $('FIND_LEAD').first().json.lead_id ] }}"
+        }
+      },
+      "id": "f5f03060-000a-49b7-8ca6-c8a21ac9dd1c",
+      "name": "CREATE_FOLLOWUP",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE activities SET description = 'Missed call — text-back sent', metadata = metadata || jsonb_build_object('sms_sent', $2::boolean)\nWHERE id = $1::uuid RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('FIND_LEAD').first().json.activity_id, $('SEND_SMS').first().json.sent === true ] }}"
+        }
+      },
+      "id": "a89f9acb-7623-412e-ae02-df8fc0735bd7",
+      "name": "LOG_ACTIVITY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3100,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 14 · Missed Call Recovery\nPoint the Twilio number's **Call status changes** callback (or a `<Dial action>` on your forwarding TwiML) at\n`/webhook/roofradar/call-status`. Missed inbound calls get a text-back and enter the nurture sequence at step 2.\nDe-duplicated by CallSid.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "4c94fc88-2023-42de-a64b-68a33ba6cf56",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "TWILIO_CALL_STATUS_WEBHOOK": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_TWIML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESPOND_TWIML": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE_CALL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE_CALL": {
+      "main": [
+        [
+          {
+            "node": "CHECK_STATUS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_STATUS": {
+      "main": [
+        [
+          {
+            "node": "RESOLVE_ORG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESOLVE_ORG": {
+      "main": [
+        [
+          {
+            "node": "MISSED?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MISSED?": {
+      "main": [
+        [
+          {
+            "node": "FIND_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_CALL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_LEAD": {
+      "main": [
+        [
+          {
+            "node": "CHECK_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_CONSENT": {
+      "main": [
+        [
+          {
+            "node": "PREP_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_SMS": {
+      "main": [
+        [
+          {
+            "node": "SEND_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_SMS": {
+      "main": [
+        [
+          {
+            "node": "CREATE_FOLLOWUP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_FOLLOWUP": {
+      "main": [
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "14",
+    "description": "Twilio call status → missed? → text-back within seconds + follow-up"
+  }
+}

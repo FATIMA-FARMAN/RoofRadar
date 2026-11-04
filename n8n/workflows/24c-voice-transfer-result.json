@@ -1,0 +1,223 @@
+{
+  "name": "RR 24C · Voice Transfer Result",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "roofradar/voice-transfer-result",
+        "options": {},
+        "responseMode": "responseNode",
+        "authentication": "basicAuth"
+      },
+      "id": "8f72b965-c9c3-4c1d-a327-fb97200153c0",
+      "name": "TRANSFER_RESULT_WEBHOOK",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "__CRED_TWILIO_HOOK_ID__",
+          "name": "RoofRadar Twilio Webhook Auth"
+        }
+      },
+      "webhookId": "3ab7ff5b-e14d-4111-b2ea-07a20c74eac8"
+    },
+    {
+      "parameters": {
+        "jsCode": "const b = $json.body || {};\nconst status = String(b.DialCallStatus || 'failed').toLowerCase();\nreturn [{ json: { call_sid: b.CallSid, status, answered: status === 'completed' } }];"
+      },
+      "id": "706ad66a-7be9-4568-8c34-570188b933c3",
+      "name": "NORMALIZE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.answered ? '<Response><Hangup/></Response>' : '<Response><Say>Sorry, our team could not pick up right now. We have flagged your call as a priority and someone will call you back shortly. Goodbye.</Say><Hangup/></Response>' }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "1900ac5e-70b9-411b-ac4a-c78d5911cfc5",
+      "name": "RESPOND_TWIML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (\n  UPDATE voice_sessions SET status = CASE WHEN $2::text = 'completed' THEN 'TRANSFERRED' ELSE status END,\n         metadata = metadata || jsonb_build_object('transfer_status', $2::text)\n  WHERE call_sid = $1::text RETURNING lead_id, organization_id\n), h AS (\n  UPDATE human_handoffs SET transfer_status = $2::text\n  WHERE id = (SELECT id FROM human_handoffs WHERE lead_id = (SELECT lead_id FROM s) AND status = 'OPEN'\n              ORDER BY created_at DESC LIMIT 1)\n  RETURNING id\n)\nSELECT l.name, l.phone, l.problem_type, o.settings->>'slack_channel' AS slack_channel, (SELECT count(*) FROM h) AS updated\nFROM s JOIN leads l ON l.id = s.lead_id JOIN organizations o ON o.id = s.organization_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE').first().json.call_sid, $('NORMALIZE').first().json.status ] }}"
+        }
+      },
+      "id": "d49f47dd-24e8-41aa-a1be-39375891a8a3",
+      "name": "UPDATE_HANDOFF",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "0b9a40a2-1810-445f-b49c-3cc87a318d62",
+              "leftValue": "={{ !$('NORMALIZE').first().json.answered && !!$json.slack_channel }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0c6f39a1-9225-435e-9375-8880329edf40",
+      "name": "TRANSFER_FAILED?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.slack_channel }}"
+        },
+        "text": "={{ '📞 PRIORITY CALLBACK — transfer ' + $('NORMALIZE').first().json.status + '\\n' + ($json.name || 'Unknown caller') + ' · ' + $json.phone + '\\n' + ($json.problem_type || '') }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "bff8fd74-796d-4f6b-8dd6-56887b90b0e5",
+      "name": "ALERT_PRIORITY_CALLBACK",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "TRANSFER_RESULT_WEBHOOK": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_TWIML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESPOND_TWIML": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_HANDOFF": {
+      "main": [
+        [
+          {
+            "node": "TRANSFER_FAILED?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TRANSFER_FAILED?": {
+      "main": [
+        [
+          {
+            "node": "ALERT_PRIORITY_CALLBACK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "24C",
+    "description": "<Dial action> callback after a warm transfer: record DialCallStatus; if nobody answered, priority callback"
+  }
+}

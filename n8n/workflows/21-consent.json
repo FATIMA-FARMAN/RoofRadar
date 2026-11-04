@@ -1,0 +1,290 @@
+{
+  "name": "RR 21 · Consent",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "9c579f85-f631-4b29-83c2-fd59554485eb",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst channel = t.channel === 'voice' ? 'all' : (t.channel || 'sms');\nreturn [{ json: { lead_id: t.lead_id, channel, text: String(t.body || '').trim(), action: t.action || null, source: t.source || 'unknown' } }];"
+      },
+      "id": "fdf2f404-10f7-4b7f-97a0-b6f26be12ddb",
+      "name": "NORMALIZE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT CASE\n         WHEN $2::text = 'OPT_OUT' OR rr_is_opt_out($1::text) THEN 'OPT_OUT'\n         WHEN $2::text = 'OPT_IN'  OR rr_is_opt_in($1::text)  THEN 'OPT_IN'\n         ELSE 'NONE'\n       END AS consent_action;",
+        "options": {
+          "queryReplacement": "={{ [ $json.text, $json.action || '' ] }}"
+        }
+      },
+      "id": "1c4d8057-4f9a-4c8d-b891-d22b27d11e39",
+      "name": "CLASSIFY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO consents (lead_id, channel, consent_status, source, metadata)\nSELECT $1::uuid, $2::text, CASE WHEN $3::text = 'OPT_OUT' THEN 'OPTED_OUT' ELSE 'OPTED_IN' END, $4::text,\n       jsonb_build_object('text', $5::text)\nWHERE $3::text IN ('OPT_OUT','OPT_IN')\nRETURNING id, consent_status, $3::text AS consent_action;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE').first().json.lead_id, $('NORMALIZE').first().json.channel, $json.consent_action, $('NORMALIZE').first().json.source, $('NORMALIZE').first().json.text ] }}"
+        }
+      },
+      "id": "b34eeec3-6151-4cf9-875e-f9e85970044e",
+      "name": "UPDATE_CONSENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "87b6048e-38e5-4ada-9624-692da8a00562",
+              "leftValue": "={{ $json.id !== undefined && $json.id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5f848948-9b6b-49ff-b950-ff0efa1cec7c",
+      "name": "UPDATE_CONSENT_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "1d9947fd-ac04-4583-b697-d869996ce698",
+              "leftValue": "={{ $json.consent_action === 'OPT_OUT' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9ceea931-24dc-40ee-b2ad-f6ac16e0565e",
+      "name": "STOP?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH l AS (UPDATE leads SET status = 'STOPPED' WHERE id = $1::uuid RETURNING organization_id),\n     c AS (UPDATE conversations SET ai_active = false WHERE lead_id = $1::uuid AND status = 'ACTIVE' RETURNING id),\n     f AS (UPDATE followups SET status = 'CANCELLED', skip_reason = 'OPTED_OUT' WHERE lead_id = $1::uuid AND status = 'PENDING' RETURNING id)\nSELECT rr_log_event((SELECT organization_id FROM l), $1::uuid, '21_CONSENT', 'OPTED_OUT',\n       jsonb_build_object('source', $2::text, 'paused_conversations', (SELECT count(*) FROM c), 'cancelled_followups', (SELECT count(*) FROM f))) AS event_id,\n       'OPTED_OUT' AS consent_status, true AS stopped;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE').first().json.lead_id, $('NORMALIZE').first().json.source ] }}"
+        }
+      },
+      "id": "1a5b6c8f-9bd5-4fd8-9b0d-5115186444a8",
+      "name": "DISABLE_AI_OUTREACH",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH l AS (\n  UPDATE leads SET status = CASE WHEN status = 'STOPPED' THEN 'CONTACTED' ELSE status END\n  WHERE id = $1::uuid AND $2::text = 'OPT_IN' RETURNING organization_id\n), c AS (\n  UPDATE conversations SET ai_active = true\n  WHERE lead_id = $1::uuid AND status = 'ACTIVE' AND $2::text = 'OPT_IN'\n    AND NOT EXISTS (SELECT 1 FROM leads WHERE id = $1::uuid AND human_handoff) RETURNING id\n)\nSELECT rr_log_event((SELECT organization_id FROM leads WHERE id = $1::uuid), $1::uuid, '21_CONSENT', 'CONSENT_' || $2::text,\n       jsonb_build_object('reactivated', (SELECT count(*) FROM l), 'ai_resumed', (SELECT count(*) FROM c))) AS event_id,\n       $2::text AS consent_status, false AS stopped;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE').first().json.lead_id, $('CLASSIFY').first().json.consent_action ] }}"
+        }
+      },
+      "id": "05e2c6bd-b539-4f9a-8ce4-4e70496c1ed7",
+      "name": "LOG_CONSENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 21 · Consent\nCalled from 03/08 (keyword gate, before any AI), 04 (router STOP), 24A (voice opt-out).\nKeywords: STOP · STOPALL · UNSUBSCRIBE · CANCEL · END · QUIT · OPT OUT · \"do not contact me\" (see `rr_is_opt_out`).\nTwilio also auto-replies to STOP/START on standard numbers — we record, we don't double-reply.\n`rr_can_contact()` is re-checked by 07 at send time.",
+        "width": 600,
+        "height": 260
+      },
+      "id": "08f3c15f-3998-47d0-aea9-654e3ecef95b",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "UPDATE_CONSENT": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_CONSENT_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE": {
+      "main": [
+        [
+          {
+            "node": "CLASSIFY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLASSIFY": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_CONSENT_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "STOP?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "STOP?": {
+      "main": [
+        [
+          {
+            "node": "DISABLE_AI_OUTREACH",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "21",
+    "description": "Opt-out / opt-in ledger. STOP wins everywhere, instantly"
+  }
+}

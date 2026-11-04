@@ -1,0 +1,241 @@
+{
+  "name": "RR 18 · Daily Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "3a5066e2-8557-4504-a036-42a8cdc8fcf7",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT o.id AS organization_id, o.name AS org_name, o.timezone, o.settings,\n       to_char((NOW() AT TIME ZONE o.timezone)::date - 1, 'YYYY-MM-DD') AS day,\n       to_jsonb(a.*) AS metrics\nFROM organizations o\nLEFT JOIN analytics_daily a ON a.organization_id = o.id AND a.day = ((NOW() AT TIME ZONE o.timezone)::date - 1)\nWHERE o.active;",
+        "options": {}
+      },
+      "id": "fb74a9e8-f01e-4a36-ac74-d469d5e5788b",
+      "name": "GET_DAILY_ANALYTICS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT coalesce(jsonb_agg(jsonb_build_object('start', a.start_at, 'name', l.name, 'address', l.address,\n                'problem', l.problem_type, 'phone', l.phone) ORDER BY a.start_at), '[]'::jsonb) AS appointments\nFROM appointments a JOIN leads l ON l.id = a.lead_id\nWHERE a.organization_id = $1::uuid AND a.status IN ('SCHEDULED','CONFIRMED')\n  AND a.start_at >= ((NOW() AT TIME ZONE $2::text)::date)::timestamp AT TIME ZONE $2::text\n  AND a.start_at <  (((NOW() AT TIME ZONE $2::text)::date) + 1)::timestamp AT TIME ZONE $2::text;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id, $json.timezone ] }}"
+        }
+      },
+      "id": "6862ed2a-b7f6-4384-9619-6091d08528ef",
+      "name": "GET_APPOINTMENTS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT coalesce(jsonb_agg(jsonb_build_object('name', coalesce(name, phone), 'score', lead_score, 'status', status,\n                'problem', problem_type) ORDER BY lead_score DESC), '[]'::jsonb) AS hot_leads\nFROM (SELECT * FROM leads\n      WHERE organization_id = $1::uuid AND lead_score >= 70\n        AND status NOT IN ('BOOKED','WON','LOST','STOPPED','DISQUALIFIED')\n        AND created_at > NOW() - INTERVAL '14 days'\n      ORDER BY lead_score DESC LIMIT 5) t;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_DAILY_ANALYTICS').item.json.organization_id ] }}"
+        }
+      },
+      "id": "26aecf9f-75dd-4cdb-81c3-5d24f0465238",
+      "name": "GET_HOT_LEADS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const a = $('GET_DAILY_ANALYTICS').item.json;\nconst m = a.metrics || {};\nconst tz = a.timezone;\nconst appts = $('GET_APPOINTMENTS').item.json.appointments || [];\nconst hot = $json.hot_leads || [];\nconst day = DateTime.fromISO(a.day).toFormat('ccc LLL d');\nconst pct = v => (Number(v || 0) * 100).toFixed(0) + '%';\nconst lines = [\n  `${a.org_name.toUpperCase()} DAILY REPORT — ${day}`,\n  '',\n  `New leads: ${m.new_leads ?? 0}`,\n  `Qualified: ${m.qualified_leads ?? 0}`,\n  `Appointments booked: ${m.bookings ?? 0} (booking rate ${pct(m.booking_rate)})`,\n  `Human handoffs: ${m.human_handoffs ?? 0}`,\n  `Missed calls: ${m.missed_calls ?? 0}`,\n  `Voice AI calls: ${m.voice_calls ?? 0}`,\n  `Median first response: ${m.median_first_response_seconds != null ? m.median_first_response_seconds + 's' : 'n/a'}`,\n  '',\n  `Today's inspections (${appts.length}):`,\n  ...(appts.length ? appts.map(x => `• ${DateTime.fromISO(x.start).setZone(tz).toFormat('h:mm a')} — ${x.name || x.phone}${x.address ? ', ' + x.address : ''}${x.problem ? ' (' + x.problem + ')' : ''}`) : ['• none']),\n  '',\n  'Hot leads (not yet booked):',\n  ...(hot.length ? hot.map(h => `• ${h.name} — ${h.score}`) : ['• none'])\n];\nif (!a.metrics) lines.splice(1, 0, '(analytics not computed yet — workflow 17 runs at 00:15)');\nreturn { json: { text: lines.join('\\n'), subject: `${a.org_name} daily report — ${day}`,\n                 slack_channel: a.settings?.slack_channel, report_email: a.settings?.report_email } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "7a65955c-2c68-460d-82ac-a71ce53a837b",
+      "name": "GENERATE_REPORT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.slack_channel }}"
+        },
+        "text": "={{ '```' + $json.text + '```' }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "82c5962b-5f56-4e4f-af3b-a11fc4659ddc",
+      "name": "SEND_SLACK",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "RoofRadar AI <reports@roofradar.ai>",
+        "toEmail": "={{ $('GENERATE_REPORT').item.json.report_email }}",
+        "subject": "={{ $('GENERATE_REPORT').item.json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $('GENERATE_REPORT').item.json.text }}",
+        "options": {}
+      },
+      "id": "34687e95-ac26-4559-93c8-4f352d4e0c7f",
+      "name": "SEND_EMAIL",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "__CRED_SMTP_ID__",
+          "name": "RoofRadar SMTP"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_DAILY_ANALYTICS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_DAILY_ANALYTICS": {
+      "main": [
+        [
+          {
+            "node": "GET_APPOINTMENTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_APPOINTMENTS": {
+      "main": [
+        [
+          {
+            "node": "GET_HOT_LEADS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_HOT_LEADS": {
+      "main": [
+        [
+          {
+            "node": "GENERATE_REPORT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GENERATE_REPORT": {
+      "main": [
+        [
+          {
+            "node": "SEND_SLACK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_SLACK": {
+      "main": [
+        [
+          {
+            "node": "SEND_EMAIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "18",
+    "description": "08:00: yesterday's KPIs + today's inspections + hot leads → Slack + email"
+  }
+}

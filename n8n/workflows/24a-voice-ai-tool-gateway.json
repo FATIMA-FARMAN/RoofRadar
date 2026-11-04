@@ -1,0 +1,933 @@
+{
+  "name": "RR 24A · Voice AI Tool Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "roofradar/voice-tool",
+        "options": {},
+        "responseMode": "responseNode",
+        "authentication": "headerAuth"
+      },
+      "id": "319f6b25-5d49-4143-8cb3-9c4232540016",
+      "name": "VOICE_TOOL_WEBHOOK",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__CRED_VOICE_KEY_ID__",
+          "name": "RoofRadar Voice Gateway Key"
+        }
+      },
+      "webhookId": "00e51ccc-ad87-44c4-81d5-69dae9ba7642"
+    },
+    {
+      "parameters": {
+        "jsCode": "// E.164 normaliser. Assumes US/Canada (+1) when a bare 10/11-digit number arrives.\nfunction normalizePhone(phone) {\n  if (!phone) return null;\n  let p = String(phone).trim().replace(/^whatsapp:/i, '').replace(/[^\\d+]/g, '');\n  if (p.startsWith('00')) p = '+' + p.substring(2);\n  if (!p.startsWith('+') && p.length === 10) p = '+1' + p;\n  if (!p.startsWith('+') && p.length === 11 && p.startsWith('1')) p = '+' + p;\n  return /^\\+[1-9]\\d{7,14}$/.test(p) ? p : null;\n}\n\nconst b = $json.body || {};\nconst allowed = ['find_lead','get_lead','qualify_lead','get_available_slots','book_appointment',\n                 'reschedule_appointment','send_sms_confirmation','human_handoff','opt_out'];\nconst call = b.call || {};\nconst tool = allowed.includes(b.tool) ? (b.tool === 'get_lead' ? 'find_lead' : b.tool) : 'INVALID';\nreturn [{ json: {\n  tool, requested_tool: b.tool, args: b.args || {},\n  call_sid: call.call_sid || null,\n  from: normalizePhone(call.from), to: normalizePhone(call.to),\n  lead_id: call.lead_id || null, conversation_id: call.conversation_id || null,\n  session_id: call.session_id || null\n}}];"
+      },
+      "id": "1dfd819b-aeac-4818-b7de-d4ae3599c05b",
+      "name": "NORMALIZE_TOOL_CALL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "3a5e3b79-0f20-465e-951d-d276eed4aa73",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "find_lead",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "find_lead"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "49a63ff1-4372-4388-9930-91153809141f",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "qualify_lead",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "qualify_lead"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "a4d114d6-aaac-41d0-bd7a-dcbbc3295eac",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "get_available_slots",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "get_available_slots"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "5638f2bb-3d60-42d8-b5d1-e5377dc3ef39",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "book_appointment",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "book_appointment"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "ca515b8a-e470-44b2-a004-c78bec2f3100",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "reschedule_appointment",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "reschedule_appointment"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "6a53f1fb-993e-43b3-a7ba-a5b1f9831739",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "send_sms_confirmation",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "send_sms_confirmation"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "d8c66fd6-e66b-4ecf-a219-7c0808e292d3",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "human_handoff",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "human_handoff"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "028b9650-5dd2-48e9-988c-58dcb654ba22",
+                    "leftValue": "={{ $json.tool }}",
+                    "rightValue": "opt_out",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "opt_out"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "69e60f94-a765-4704-9da1-f2630da057e3",
+      "name": "ROUTE_TOOL",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH o AS (SELECT id, name, settings FROM organizations WHERE business_phone = $2::text AND active LIMIT 1),\nl AS (\n  INSERT INTO leads (organization_id, phone, source, status, preferred_channel)\n  SELECT o.id, $1::text, 'voice', 'NEW', 'sms' FROM o\n  ON CONFLICT (organization_id, phone) WHERE phone IS NOT NULL DO UPDATE SET updated_at = NOW()\n  RETURNING *, (xmax = 0) AS inserted\n),\nc AS (\n  INSERT INTO conversations (organization_id, lead_id, channel, status, ai_active, external_session_id, last_message_at)\n  SELECT l.organization_id, l.id, 'voice', 'ACTIVE', true, $3::text, NOW() FROM l\n  ON CONFLICT (lead_id, channel) WHERE status = 'ACTIVE'\n  DO UPDATE SET external_session_id = EXCLUDED.external_session_id, last_message_at = NOW()\n  RETURNING id\n),\ns AS (\n  UPDATE voice_sessions SET lead_id = (SELECT id FROM l), organization_id = (SELECT organization_id FROM l)\n  WHERE call_sid = $3::text RETURNING id\n)\nSELECT l.id AS lead_id, (SELECT id FROM c) AS conversation_id, l.organization_id,\n       l.name, l.address, l.problem_type, l.urgency, l.status, l.lead_score, l.human_handoff,\n       l.inserted AS is_new_caller,\n       (l.status <> 'STOPPED' AND COALESCE((SELECT c.consent_status <> 'OPTED_OUT' FROM consents c\n                  WHERE c.lead_id = l.id AND c.channel IN ('sms','all') ORDER BY c.captured_at DESC LIMIT 1), true)) AS can_text,\n       (SELECT jsonb_build_object('appointment_id', a.id, 'start_at', a.start_at)\n          FROM appointments a WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW()\n          ORDER BY a.start_at LIMIT 1) AS upcoming_appointment,\n       (SELECT count(*) FROM s) AS session_linked\nFROM l;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE_TOOL_CALL').first().json.from, $('NORMALIZE_TOOL_CALL').first().json.to, $('NORMALIZE_TOOL_CALL').first().json.call_sid ] }}"
+        }
+      },
+      "id": "4440d0f4-2a5a-4355-9002-cbae4cfe281b",
+      "name": "FIND_OR_CREATE_VOICE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, lead: $json }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "41c34aab-4502-43df-9ff0-d7b26b902678",
+      "name": "RESPOND_FIND_LEAD",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET\n  name = COALESCE(NULLIF($2::text,''), name),\n  address = COALESCE(NULLIF($3::text,''), address),\n  problem_type = COALESCE(NULLIF($4::text,''), problem_type),\n  email = COALESCE(email, NULLIF($5::text,''))\nWHERE id = $1::uuid RETURNING id AS lead_id, organization_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE_TOOL_CALL').first().json.lead_id, $('NORMALIZE_TOOL_CALL').first().json.args.name || '', $('NORMALIZE_TOOL_CALL').first().json.args.address || '', $('NORMALIZE_TOOL_CALL').first().json.args.problem_type || '', $('NORMALIZE_TOOL_CALL').first().json.args.email || '' ] }}"
+        }
+      },
+      "id": "89a41728-b4c6-45d6-9fd7-c1a908d1a591",
+      "name": "SAVE_CALLER_FACTS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $('NORMALIZE_TOOL_CALL').first().json.lead_id, conversation_id: $('NORMALIZE_TOOL_CALL').first().json.conversation_id, organization_id: $json.organization_id, channel: 'voice', mode: 'SCORE_ONLY' } }];"
+      },
+      "id": "79f8560a-12e7-4d72-860e-1763d3e3455c",
+      "name": "PREP_QUALIFY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__05__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "882f79b1-a09d-4da9-b8bf-306583263789",
+      "name": "EXECUTE_05_QUALIFICATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, qualification: $json }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "8ab27f41-a82f-4568-bf7c-ce2f8e6a2d97",
+      "name": "RESPOND_QUALIFY",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const a = $('NORMALIZE_TOOL_CALL').first().json.args;\nreturn [{ json: { lead_id: $('NORMALIZE_TOOL_CALL').first().json.lead_id,\n  preferred_date: /^\\d{4}-\\d{2}-\\d{2}$/.test(a.date || '') ? a.date : null,\n  preferred_time: /^\\d{2}:\\d{2}$/.test(a.preferred_time || '') ? a.preferred_time : null } }];"
+      },
+      "id": "3fae07ee-18d9-4274-864d-f2fc2925b0bc",
+      "name": "PREP_SLOTS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__09__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "34e50f43-ef8c-423f-85df-9804cd01399d",
+      "name": "EXECUTE_09_AVAILABILITY",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, available: $json.available, slots: $json.available_slots, timezone: $json.timezone }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "7734a9b6-2c9d-4cc6-b38b-eb290df757b8",
+      "name": "RESPOND_SLOTS",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $('NORMALIZE_TOOL_CALL').first().json.lead_id, conversation_id: $('NORMALIZE_TOOL_CALL').first().json.conversation_id,\n  slot: $('NORMALIZE_TOOL_CALL').first().json.args.slot, reschedule: $('NORMALIZE_TOOL_CALL').first().json.tool === 'reschedule_appointment', channel: 'voice', source: 'voice' } }];"
+      },
+      "id": "af846c81-f583-442f-a2d1-4a2f6eca0342",
+      "name": "PREP_BOOK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__10__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "6b995ff1-93e2-410c-a2ce-b68db3c552a1",
+      "name": "EXECUTE_10_BOOK_APPOINTMENT",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, ...$json }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "05c1cae7-4702-4144-99ff-1b3a04cce27e",
+      "name": "RESPOND_BOOKING",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS lead_id, l.name, o.name AS org_name, o.timezone,\n       (SELECT a.start_at FROM appointments a WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED')\n          AND a.start_at > NOW() ORDER BY a.start_at LIMIT 1) AS next_appointment\nFROM leads l JOIN organizations o ON o.id = l.organization_id WHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE_TOOL_CALL').first().json.lead_id ] }}"
+        }
+      },
+      "id": "43201e78-1a31-4d6e-8e3c-0780c25ea01a",
+      "name": "GET_SMS_CONTEXT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        1020
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst when = r.next_appointment ? DateTime.fromJSDate(new Date(r.next_appointment)).setZone(r.timezone).toFormat(\"cccc, LLL d 'at' h:mm a\") : null;\nconst body = when\n  ? `Thanks for calling ${r.org_name}! Your roof inspection is on ${when}. Reply here if you have any questions.`\n  : `Thanks for calling ${r.org_name}! Reply to this text anytime and we'll help you get your roof sorted.`;\nreturn [{ json: { lead_id: r.lead_id, channel: 'sms', body, kind: 'VOICE_FOLLOWUP_SMS', ai_generated: false } }];"
+      },
+      "id": "668d89ec-7cd6-4572-bb9a-a54ec97179db",
+      "name": "PREP_SMS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        1020
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__07__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "a099b26b-36b0-4621-921b-2c41328055b0",
+      "name": "EXECUTE_07_SEND_SMS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, sent: $json.sent === true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "d765f62d-8a98-4f07-81ee-aade021c8a4a",
+      "name": "RESPOND_SMS",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1800,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const a = $('NORMALIZE_TOOL_CALL').first().json.args;\nreturn [{ json: { lead_id: $('NORMALIZE_TOOL_CALL').first().json.lead_id, conversation_id: $('NORMALIZE_TOOL_CALL').first().json.conversation_id, channel: 'voice',\n  reason: a.reason || 'Caller asked for a person', priority: a.emergency ? 'EMERGENCY' : 'NORMAL', notify_customer: false } }];"
+      },
+      "id": "7bc07a2a-b266-4acf-b34a-abf56f79e88e",
+      "name": "PREP_HANDOFF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__15__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "5c788ac0-9c8d-4366-a280-aae594fc4a64",
+      "name": "EXECUTE_15_HUMAN_HANDOFF",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, transfer: !!$json.handoff_phone, handoff_phone: $json.handoff_phone, priority: $json.priority }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "ec85d592-dd89-43e0-842d-030c47db8e90",
+      "name": "RESPOND_HANDOFF",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        1020
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $('NORMALIZE_TOOL_CALL').first().json.lead_id, channel: 'voice', body: 'voice opt-out', action: 'OPT_OUT', source: 'voice' } }];"
+      },
+      "id": "41d2c399-d845-49c8-8e99-1c51c0565bf1",
+      "name": "PREP_OPT_OUT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        1380
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__21__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "d31cff87-dfef-4dcd-9a56-506ade4ba1a3",
+      "name": "EXECUTE_21_CONSENT",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        1280,
+        1380
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, opted_out: true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "cdf41fdc-4034-4602-9660-6fec4a792bcd",
+      "name": "RESPOND_OPT_OUT",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: 'unknown tool: ' + $('NORMALIZE_TOOL_CALL').first().json.requested_tool }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "c758a0c3-0966-46cc-8aab-5d375259cbc0",
+      "name": "RESPOND_INVALID_TOOL",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        1560
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 24A · Voice Tool Gateway\nThe voice server calls `POST /webhook/roofradar/voice-tool` with header `X-RoofRadar-Key` and\n`{ tool, args, call: { call_sid, from, to, lead_id, conversation_id } }`.\nThe voice AI never touches the database or calendar directly — every tool reuses workflows 05/07/09/10/15/21,\nso voice gets the same validation, consent, idempotency and audit trail as SMS.",
+        "width": 620,
+        "height": 260
+      },
+      "id": "d7122085-e939-4469-a05a-9a0c04b2befd",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "VOICE_TOOL_WEBHOOK": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE_TOOL_CALL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE_TOOL_CALL": {
+      "main": [
+        [
+          {
+            "node": "ROUTE_TOOL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE_TOOL": {
+      "main": [
+        [
+          {
+            "node": "FIND_OR_CREATE_VOICE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SAVE_CALLER_FACTS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_BOOK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_BOOK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "GET_SMS_CONTEXT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_OPT_OUT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RESPOND_INVALID_TOOL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_OR_CREATE_VOICE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_FIND_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_CALLER_FACTS": {
+      "main": [
+        [
+          {
+            "node": "PREP_QUALIFY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_QUALIFY": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_05_QUALIFICATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_05_QUALIFICATION": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_QUALIFY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_SLOTS": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_09_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_09_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_BOOK": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_10_BOOK_APPOINTMENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_10_BOOK_APPOINTMENT": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_BOOKING",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_SMS_CONTEXT": {
+      "main": [
+        [
+          {
+            "node": "PREP_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_SMS": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_07_SEND_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_07_SEND_SMS": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_HANDOFF": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_15_HUMAN_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_15_HUMAN_HANDOFF": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_OPT_OUT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_21_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_21_CONSENT": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_OPT_OUT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "24A",
+    "description": "Controlled tools for the voice agent: every action is validated here and executed by the same workflows as SMS"
+  }
+}

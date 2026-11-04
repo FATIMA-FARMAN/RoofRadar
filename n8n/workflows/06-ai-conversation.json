@@ -1,0 +1,425 @@
+{
+  "name": "RR 06 · AI Conversation",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "1f63177d-12b6-45dc-8002-fc2318162335",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT to_jsonb(l.*) AS lead,\n       to_jsonb(o.*) AS org,\n       rr_can_contact(l.id, coalesce(NULLIF($2::text,''), 'sms')) AS can_contact,\n       (SELECT to_jsonb(a.*) FROM appointments a\n         WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW()\n         ORDER BY a.start_at LIMIT 1) AS upcoming_appointment\nFROM leads l JOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, ($('EXECUTE_WORKFLOW_TRIGGER').first().json.channel === 'whatsapp' ? 'whatsapp' : 'sms') || 'sms' ] }}"
+        }
+      },
+      "id": "b2ca9cd3-380e-49c7-9457-44ec1d1565bf",
+      "name": "GET_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_recent_messages($1::uuid, 12) AS history;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "b65787d4-0911-4867-884a-0987bd8fbb4a",
+      "name": "GET_MESSAGES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, timezone, settings FROM organizations WHERE id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.lead.organization_id ] }}"
+        }
+      },
+      "id": "c43fd61d-631c-454a-ab4b-dc4fc3b11e41",
+      "name": "GET_COMPANY_RULES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "e62ecbe3-1d5c-4caa-b4cf-be91faef2c2b",
+              "leftValue": "={{ $('GET_LEAD').first().json.can_contact && !$('GET_LEAD').first().json.lead.human_handoff && !!$('GET_LEAD').first().json.lead.phone }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "93b73c86-76f7-49e5-8648-bc3924126ea8",
+      "name": "CAN_CONTACT?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, '06_AI_CONVERSATION', 'SKIPPED_NO_CONTACT', $3::jsonb) AS id, false AS sent, 'blocked_or_paused' AS reason, $2::uuid AS lead_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.lead.organization_id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, JSON.stringify({mode: $('EXECUTE_WORKFLOW_TRIGGER').first().json.mode}) ] }}"
+        }
+      },
+      "id": "5bcd3184-1245-43ac-9fe0-ed36cdc19972",
+      "name": "LOG_SKIPPED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function fill(t, vars) { return t.replace(/\\{(\\w+)\\}/g, (m, k) => (vars[k] ?? m)); }\nfunction buildOpenAI(model, system, userObj, maxTokens) {\n  const req = {\n    model,\n    messages: [\n      { role: 'system', content: system },\n      { role: 'user', content: typeof userObj === 'string' ? userObj : JSON.stringify(userObj) }\n    ],\n    response_format: { type: 'json_object' },\n    max_completion_tokens: maxTokens || 1500\n  };\n  // GPT-5 family / o-series are reasoning models: keep reasoning light for chat latency\n  if (/^(gpt-5|o\\d)/.test(model)) req.reasoning_effort = 'low';\n  return req;\n}\nconst CONV = \"You are the customer communication assistant for {company}. You write {channel} messages to homeowners.\\n\\nRules:\\n1. Be concise: at most 2 short sentences plus one question. No emojis unless the customer uses them.\\n2. Be professional and friendly ({brand_voice}).\\n3. Never invent prices, discounts, or deadlines. If asked about price, say a specialist gives a written quote after the free inspection.\\n4. Never invent appointment availability and never write specific dates or times \\u2014 the system appends real open times itself.\\n5. Never claim an appointment is booked, confirmed, or scheduled.\\n6. Never provide unsafe instructions (no climbing on roofs, no electrical advice). For active leaks you may suggest moving valuables and placing a bucket.\\n7. Do not diagnose structural problems.\\n8. Do not pretend to be human. If asked, say you're the {company} virtual assistant and a team member can help anytime.\\n9. Ask only for information needed to move the conversation forward \\u2014 one question at a time.\\n10. Only use facts from the company info JSON.\\n11. Never ask for anything listed in already_known_do_not_ask_again (for example the property address from the web form).\\n\\nCompany info JSON is provided with each request.\\nReturn JSON only: {\\\"reply\\\": \\\"message text\\\", \\\"next_action\\\": \\\"WAIT_FOR_CUSTOMER\\\"|\\\"HUMAN\\\"|\\\"NONE\\\"}\";\nconst MODES = {\"FIRST_CONTACT\": \"The lead just submitted a form. Thank them by first name if known, reference their problem briefly, and ask the single most useful next question (usually: is it an active leak / when would an inspection work).\", \"ANSWER\": \"Answer the customer's latest question using only company info, then gently move toward a free inspection.\", \"QUALIFY\": \"Ask for the most important missing detail. Missing fields (most important first): {missing}.\", \"OFFER_SLOTS\": \"Write ONE short sentence introducing available free inspection times. Do NOT list or mention any dates or times \\u2014 the system appends the exact options below your sentence.\", \"NO_SLOTS\": \"There are no open inspection times in the requested window. Apologise briefly and say a team member will reach out to schedule. Do not mention times.\", \"DISQUALIFIED\": \"Politely explain we can't help with this request (reason: {reason}) and thank them. No question needed.\", \"FOLLOWUP\": \"Write a gentle, no-pressure follow-up to a lead who went quiet (follow-up #{step}). Reference their roofing issue if known and offer a free inspection. Keep it under 240 characters.\", \"NO_SHOW\": \"The customer missed their free roof inspection. Say kindly that we're sorry we missed them, that it's no problem, and introduce new free inspection times in ONE short sentence. Do NOT list or mention any dates or times: the system appends the exact options below your sentence.\", \"REENGAGE\": \"We haven't heard from this customer in over a month. Write a friendly, no-pressure check-in about their roofing issue (if known) and offer a free inspection. No urgency, no deadlines. Keep it under 240 characters.\", \"POST_CALL\": \"The customer just finished a phone call with our voice assistant. Send a brief recap of the next step ({reason}). Do not mention times.\"};\n\nconst t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst ctx = $('GET_LEAD').first().json;\nconst org = $('GET_COMPANY_RULES').first().json;\nconst s = org.settings || {};\nconst lead = ctx.lead;\nconst mode = t.mode || 'ANSWER';\nconst channel = t.channel === 'whatsapp' ? 'WhatsApp' : 'SMS';\nconst system = fill(CONV, { company: org.name, channel, brand_voice: s.ai?.brand_voice || 'friendly, professional' });\n// never ask again for what we already know (e.g. the address from the web form)\nconst known = {};\nif (lead.name) known.name = lead.name;\nif (lead.address) known.address = lead.address;\nif (lead.problem_type) known.problem_type = lead.problem_type;\nif (lead.email) known.email = lead.email;\nconst missing = (t.missing_fields || []).filter(f => !(\n  (f === 'address' && lead.address) || (f === 'name' && lead.name) || (f === 'problem_type' && lead.problem_type)));\nconst instruction = fill(MODES[mode] || MODES.ANSWER, {\n  missing: missing.join(', ') || (lead.address ? 'urgency and how soon they need help' : 'problem details and property address'),\n  reason: t.router_reason || 'n/a', step: t.step || 1\n});\nconst user = {\n  task: instruction,\n  mode,\n  company_info: { name: org.name, services: s.services, service_area: s.service_area?.description, faq: s.faq || {} },\n  customer: { first_name: (lead.name || '').split(' ')[0] || null, problem_type: lead.problem_type, urgency: lead.urgency, status: lead.status },\n  already_known_do_not_ask_again: known,\n  conversation: $('GET_MESSAGES').first().json.history || [],\n  latest_customer_message: t.body || t.inbound_text || null\n};\nconst model = (['FOLLOWUP','REENGAGE'].includes(mode) ? s.ai?.models?.followup : s.ai?.models?.conversation) || 'gpt-5.4';\nreturn [{ json: { openai_request: buildOpenAI(model, system, user, 1200) } }];"
+      },
+      "id": "c083ece2-e39c-4982-8da8-f55d136ea1c3",
+      "name": "PREPARE_CONTEXT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_request) }}"
+      },
+      "id": "25aea38f-89a9-4da0-a0ef-132528f3d2df",
+      "name": "OPENAI_CONVERSATION",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "__CRED_OPENAI_ID__",
+          "name": "RoofRadar OpenAI"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst content = r.choices?.[0]?.message?.content || '';\nlet parsed = null, parse_error = null;\ntry { parsed = JSON.parse(content); }\ncatch (e) {\n  const m = content.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parse_error = e2.message; } }\n  else parse_error = e.message || 'empty response';\n}\nreturn [{ json: {\n  parsed, parse_error, raw: content,\n  model: r.model || null,\n  prompt_tokens: r.usage?.prompt_tokens ?? null,\n  completion_tokens: r.usage?.completion_tokens ?? null\n}}];"
+      },
+      "id": "4c0357ca-15d3-46a5-a28c-c291fdc88dcc",
+      "name": "PARSE_JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst p = $('PARSE_JSON').first().json;\nconst org = $('GET_COMPANY_RULES').first().json;\nconst s = org.settings || {};\nconst lead = $('GET_LEAD').first().json.lead;\nconst mode = t.mode || 'ANSWER';\nconst first = (lead.name || '').split(' ')[0];\nconst hi = first ? `Hi ${first}` : 'Hi';\nconst o = p.parsed || {};\nlet reply = typeof o.reply === 'string' ? o.reply.trim() : '';\nconst errors = [];\nif (!p.parsed) errors.push('unparseable: ' + p.parse_error);\nif (!reply) errors.push('empty reply');\nconst faqText = JSON.stringify(s.faq || {});\nif (/\\$\\s?\\d|\\b\\d[\\d,]*\\s?(dollars|usd)\\b/i.test(reply) && !/\\$\\s?\\d/.test(faqText)) errors.push('mentions a price');\nif (/\\b(you('| a)?re (all )?(set|booked|scheduled|confirmed) for|appointment (is |has been )?(booked|confirmed|scheduled))\\b/i.test(reply)) errors.push('claims a booking');\nif (/\\b(climb|get|go) (up )?(on|onto) (the|your) roof\\b/i.test(reply)) errors.push('unsafe instruction');\nif (/\\b(i am|i'm) (a )?(human|real person)\\b/i.test(reply)) errors.push('claims to be human');\nconst SLOT_MODES = ['OFFER_SLOTS','NO_SHOW'];\nif (SLOT_MODES.includes(mode) && /\\b\\d{1,2}(:\\d{2})?\\s?(am|pm)\\b|\\b(mon|tues|wednes|thurs|fri|satur|sun)day\\b|\\btomorrow\\b/i.test(reply)) errors.push('mentions times itself');\nif (reply.length > 600) errors.push('too long');\nconst valid = errors.length === 0;\n\nconst FALLBACK = {\n  FIRST_CONTACT: `${hi}, thanks for contacting ${org.name}! Is water coming in right now, or is this a non-urgent issue?`,\n  ANSWER: `Thanks for your message! A ${org.name} team member will follow up shortly.`,\n  QUALIFY: `Thanks! Could you share a little more about the roof issue and the property address?`,\n  OFFER_SLOTS: `Here are our next available free inspection times:`,\n  NO_SLOTS: `Thanks! Our inspection calendar is full for that window — a team member will reach out to find a time.`,\n  DISQUALIFIED: `Thanks for reaching out to ${org.name}. Unfortunately we're not able to help with this request.`,\n  FOLLOWUP: `${hi}, just checking in from ${org.name} — would a free roof inspection help? Reply anytime.`,\n  POST_CALL: `Thanks for calling ${org.name}! Reply to this text anytime if you have questions.`,\n  NO_SHOW: `${hi}, sorry we missed you for your roof inspection, no problem at all. Here are the next free times:`,\n  REENGAGE: `${hi}, it's ${org.name} checking in. Is your roof still giving you trouble? We're happy to do a free inspection whenever suits you.`\n};\nlet body = valid ? reply : (FALLBACK[mode] || FALLBACK.ANSWER);\n\n// availability is appended by the system — the model can never invent a time\nconst slots = (t.slots || []).slice(0, s.max_slots_offered || 3);\nif (SLOT_MODES.includes(mode)) {\n  body = slots.length\n    ? body + '\\n' + slots.map((x, i) => `${i + 1}) ${x.label}`).join('\\n') + '\\nReply with the number that works best.'\n    : FALLBACK.NO_SLOTS;\n}\nif (['FIRST_CONTACT','REENGAGE'].includes(mode) && !/\\bSTOP\\b/.test(body)) body += ' Reply STOP to opt out.';\nreturn [{ json: { reply: body, ai_reply: reply, valid, errors, mode, used_fallback: !valid,\n                  next_action: o.next_action || 'WAIT_FOR_CUSTOMER' } }];"
+      },
+      "id": "cc0a9249-09b5-4dec-bf57-22e0ca707a92",
+      "name": "VALIDATE_RESPONSE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ai_interactions (organization_id, lead_id, conversation_id, workflow, model, input, output,\n                             action, confidence, valid, error, prompt_tokens, completion_tokens)\nVALUES ($1::uuid, $2::uuid, NULLIF($3::text,'')::uuid, $4::text, $5::text, $6::jsonb, $7::jsonb,\n        NULLIF($8::text,''), $9::numeric, $10::boolean, NULLIF($11::text,''), $12::int, $13::int)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.org.id, $('GET_LEAD').first().json.lead.id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.conversation_id || '', '06_AI_CONVERSATION', $('PARSE_JSON').first().json.model || $('PREPARE_CONTEXT').first().json.openai_request.model, JSON.stringify($('PREPARE_CONTEXT').first().json.openai_request.messages.slice(1)), JSON.stringify($('VALIDATE_RESPONSE').first().json), 'REPLY_' + $('VALIDATE_RESPONSE').first().json.mode || '', null ?? null, $('VALIDATE_RESPONSE').first().json.valid, ($('VALIDATE_RESPONSE').first().json.errors || []).join('; '), $('PARSE_JSON').first().json.prompt_tokens, $('PARSE_JSON').first().json.completion_tokens ] }}"
+        }
+      },
+      "id": "54c1655a-49e7-4486-97e5-61c22ea5f4bf",
+      "name": "SAVE_AI_INTERACTION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_RESPONSE').first().json;\nreturn [{ json: {\n  lead_id: t.lead_id,\n  channel: t.channel === 'whatsapp' ? 'whatsapp' : 'sms',\n  body: v.reply,\n  ai_generated: !v.used_fallback,\n  kind: 'AI_' + v.mode,\n  metadata: { mode: v.mode, used_fallback: v.used_fallback, errors: v.errors }\n}}];"
+      },
+      "id": "bf24b968-5a39-4050-8687-51d9ced759cd",
+      "name": "PREP_SEND",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__07__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "79792852-e2ba-498d-b2dd-c5f77685c624",
+      "name": "EXECUTE_07_SEND_SMS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 06 · Conversation\nModes: FIRST_CONTACT · ANSWER · QUALIFY · OFFER_SLOTS · NO_SLOTS · DISQUALIFIED · FOLLOWUP · POST_CALL.\nGuardrails reject prices, booking claims, unsafe advice, \"I'm human\", and self-invented times → safe fallback text.\nIn OFFER_SLOTS the model writes one sentence; the numbered slot list is appended from workflow 09 output.",
+        "width": 600,
+        "height": 260
+      },
+      "id": "37cf21c7-80c1-4cb3-9d97-e162212e08f9",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_LEAD": {
+      "main": [
+        [
+          {
+            "node": "GET_MESSAGES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_MESSAGES": {
+      "main": [
+        [
+          {
+            "node": "GET_COMPANY_RULES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_COMPANY_RULES": {
+      "main": [
+        [
+          {
+            "node": "CAN_CONTACT?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CAN_CONTACT?": {
+      "main": [
+        [
+          {
+            "node": "PREPARE_CONTEXT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_SKIPPED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREPARE_CONTEXT": {
+      "main": [
+        [
+          {
+            "node": "OPENAI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OPENAI_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "PARSE_JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_JSON": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_RESPONSE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_RESPONSE": {
+      "main": [
+        [
+          {
+            "node": "SAVE_AI_INTERACTION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_AI_INTERACTION": {
+      "main": [
+        [
+          {
+            "node": "PREP_SEND",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_SEND": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_07_SEND_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "06",
+    "description": "Writes the customer message for a given mode; guardrails + safe fallbacks; deterministic slot list; → 07"
+  }
+}

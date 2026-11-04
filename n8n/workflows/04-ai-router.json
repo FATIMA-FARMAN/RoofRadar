@@ -1,0 +1,1181 @@
+{
+  "name": "RR 04 · AI Router",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "139340a3-9551-4e5a-ad8f-2d57023f953a",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT to_jsonb(l.*) AS lead,\n       to_jsonb(o.*) AS org,\n       rr_can_contact(l.id, coalesce(NULLIF($2::text,''), 'sms')) AS can_contact,\n       (SELECT to_jsonb(a.*) FROM appointments a\n         WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW()\n         ORDER BY a.start_at LIMIT 1) AS upcoming_appointment\nFROM leads l JOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.channel || 'sms' ] }}"
+        }
+      },
+      "id": "3e156fbe-47d8-453d-a1b8-112f7f48da2b",
+      "name": "GET_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM conversations WHERE id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.conversation_id ] }}"
+        }
+      },
+      "id": "3a6b3fee-3234-4a9a-a57f-edfe7e457fac",
+      "name": "GET_CONVERSATION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_recent_messages($1::uuid, 12) AS history;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "03f7cdc4-2c02-4dc0-9a6a-ed91cc9477d8",
+      "name": "GET_RECENT_MESSAGES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, timezone, settings FROM organizations WHERE id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.lead.organization_id ] }}"
+        }
+      },
+      "id": "6737b1cd-1a4b-437a-89b8-86f4d1ace171",
+      "name": "GET_COMPANY_RULES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "29001695-89be-48c7-9be8-f2f02f14ded6",
+              "leftValue": "={{ $('GET_CONVERSATION').first().json.ai_active && !$('GET_LEAD').first().json.lead.human_handoff && $('GET_LEAD').first().json.lead.status !== 'STOPPED' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f36a90e6-260a-4e34-831c-274f86956c17",
+      "name": "AI_ALLOWED?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, '04_AI_ROUTER', 'AI_PAUSED_SKIP', '{}'::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_COMPANY_RULES').first().json.id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "54892be6-dd6e-4de2-b7ab-4b1cb2a9da23",
+      "name": "LOG_AI_PAUSED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function fill(t, vars) { return t.replace(/\\{(\\w+)\\}/g, (m, k) => (vars[k] ?? m)); }\nfunction buildOpenAI(model, system, userObj, maxTokens) {\n  const req = {\n    model,\n    messages: [\n      { role: 'system', content: system },\n      { role: 'user', content: typeof userObj === 'string' ? userObj : JSON.stringify(userObj) }\n    ],\n    response_format: { type: 'json_object' },\n    max_completion_tokens: maxTokens || 1500\n  };\n  // GPT-5 family / o-series are reasoning models: keep reasoning light for chat latency\n  if (/^(gpt-5|o\\d)/.test(model)) req.reasoning_effort = 'low';\n  return req;\n}\nconst ROUTER = \"You are the routing agent for {company}, a roofing company.\\nDecide the single next action for the customer's LATEST message, using the conversation history and context JSON.\\n\\nAllowed actions:\\nANSWER      \\u2013 ordinary question answerable from the approved company info (services, service area, FAQ).\\nQUALIFY     \\u2013 we still need basic facts (what the problem is, where the property is, how urgent) and the customer is engaged.\\nBOOK        \\u2013 clear intent to schedule an inspection/appointment, or the customer is choosing one of the offered_slots.\\nRESCHEDULE  \\u2013 the customer has an existing appointment (context.lead.upcoming_appointment) and wants to change or cancel it.\\nHUMAN       \\u2013 explicit request for a person; complaint; legal issue; refund; insurance dispute; pricing negotiation or\\n              a request for a price/quote; safety concern; anything unsupported; or you are not confident.\\nSTOP        \\u2013 STOP, unsubscribe, stop messaging, do not contact me, remove me.\\nEMERGENCY   \\u2013 ONLY when one of context.company.emergency_criteria is clearly and currently true. Copy the matching\\n              criterion text exactly into \\\"emergency_criteria_matched\\\". Otherwise never use EMERGENCY.\\n\\nSlot selection:\\n- If the customer picks one of context.offered_slots (by number, day, or time), set action BOOK (or RESCHEDULE when\\n  they already have an appointment) and copy that slot's \\\"iso\\\" value EXACTLY into \\\"selected_slot\\\".\\n- If they want a time that is not in offered_slots, set selected_slot null and fill preferred_date (YYYY-MM-DD, in the\\n  company timezone) and/or preferred_time (HH:MM 24h) when stated.\\n\\nNever invent availability. Never invent prices. Never create appointments. Never claim anything is booked.\\n\\nAlso rate the customer's mood in the LATEST message as \\\"sentiment\\\": POSITIVE | NEUTRAL | NEGATIVE | ANGRY.\\nANGRY = hostile, threatening, swearing at us, or a clear complaint about our service.\\n\\nReturn JSON only, exactly this shape:\\n{\\\"action\\\": \\\"...\\\", \\\"confidence\\\": 0.0-1.0, \\\"reason\\\": \\\"short why\\\", \\\"sentiment\\\": \\\"NEUTRAL\\\",\\n  \\\"selected_slot\\\": null, \\\"preferred_date\\\": null, \\\"preferred_time\\\": null,\\n  \\\"emergency_criteria_matched\\\": null, \\\"handoff_reason\\\": null}\";\n\nconst t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst ctx = $('GET_LEAD').first().json;\nconst org = $('GET_COMPANY_RULES').first().json;\nconst s = org.settings || {};\nconst lead = ctx.lead;\nconst tz = org.timezone || 'America/New_York';\nconst fmt = iso => DateTime.fromISO(String(iso)).setZone(tz).toFormat(\"ccc LLL d, h:mm a\");\nconst offered = (lead.metadata && lead.metadata.offered_slots) || [];\nconst user = {\n  now_local: DateTime.now().setZone(tz).toFormat(\"cccc yyyy-LL-dd HH:mm ZZZZ\"),\n  company: {\n    name: org.name, services: s.services, service_area: s.service_area?.description,\n    faq: s.faq || {}, emergency_criteria: s.emergency_criteria || []\n  },\n  lead: {\n    name: lead.name, status: lead.status, qualification_status: lead.qualification_status,\n    problem_type: lead.problem_type, urgency: lead.urgency, lead_score: lead.lead_score,\n    upcoming_appointment: ctx.upcoming_appointment ? { start_local: fmt(ctx.upcoming_appointment.start_at) } : null\n  },\n  offered_slots: offered.map(o => ({ iso: o.iso, label: o.label })),\n  history: $('GET_RECENT_MESSAGES').first().json.history || [],\n  latest_message: t.body\n};\nconst model = s.ai?.models?.router || 'gpt-5.4-mini';\nreturn [{ json: { openai_request: buildOpenAI(model, fill(ROUTER, { company: org.name }), user, 1500) } }];"
+      },
+      "id": "2f69d535-b706-4cc4-8824-0dfed23aa095",
+      "name": "PREPARE_ROUTER_INPUT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_request) }}"
+      },
+      "id": "7db503d1-7416-4cfb-bfa4-13824dc7b8c3",
+      "name": "OPENAI_ROUTER",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "__CRED_OPENAI_ID__",
+          "name": "RoofRadar OpenAI"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst content = r.choices?.[0]?.message?.content || '';\nlet parsed = null, parse_error = null;\ntry { parsed = JSON.parse(content); }\ncatch (e) {\n  const m = content.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parse_error = e2.message; } }\n  else parse_error = e.message || 'empty response';\n}\nreturn [{ json: {\n  parsed, parse_error, raw: content,\n  model: r.model || null,\n  prompt_tokens: r.usage?.prompt_tokens ?? null,\n  completion_tokens: r.usage?.completion_tokens ?? null\n}}];"
+      },
+      "id": "11e6b322-fd90-47fa-beea-910919d45777",
+      "name": "PARSE_JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('PARSE_JSON').first().json;\nconst ctx = $('GET_LEAD').first().json;\nconst s = $('GET_COMPANY_RULES').first().json.settings || {};\nconst o = p.parsed || {};\nconst allowed = ['ANSWER','QUALIFY','BOOK','RESCHEDULE','HUMAN','STOP','EMERGENCY'];\nconst errors = [];\nif (!p.parsed) errors.push('unparseable router output: ' + p.parse_error);\nlet action = String(o.action || '').toUpperCase();\nif (!allowed.includes(action)) errors.push('invalid action: ' + o.action);\nlet confidence = Number(o.confidence);\nif (typeof o.confidence !== 'number' || confidence < 0 || confidence > 1) { errors.push('invalid confidence'); confidence = 0; }\nconst valid = errors.length === 0;\nlet overridden = null;\nif (!valid) { action = 'HUMAN'; overridden = 'invalid_router_output'; }\n\n// business rules (deterministic, cannot be talked around)\nconst minConf = s.ai?.min_router_confidence ?? 0.6;\nif (valid && action !== 'STOP' && confidence < minConf) { overridden = 'low_confidence'; action = 'HUMAN'; }\nif (action === 'EMERGENCY' && !(s.emergency_criteria || []).includes(o.emergency_criteria_matched)) {\n  overridden = 'emergency_without_configured_criterion'; action = 'HUMAN';\n}\nif (action === 'RESCHEDULE' && !ctx.upcoming_appointment) action = 'BOOK';\nconst sentiment = ['POSITIVE','NEUTRAL','NEGATIVE','ANGRY'].includes(String(o.sentiment || '').toUpperCase())\n  ? String(o.sentiment).toUpperCase() : 'NEUTRAL';\n// an upset customer always gets a person (STOP and EMERGENCY keep their own handling)\nif (sentiment === 'ANGRY' && !['STOP','EMERGENCY','HUMAN'].includes(action)) { overridden = 'upset_customer'; action = 'HUMAN'; }\n\n// a slot is only accepted if WE offered it, recently, and it is still in the future\nconst md = ctx.lead.metadata || {};\nconst offered = md.offered_slots || [];\nconst offeredAt = md.offered_at ? new Date(md.offered_at).getTime() : 0;\nlet selected_slot = null;\nif (o.selected_slot) {\n  const ok = offered.some(x => x.iso === o.selected_slot)\n          && (Date.now() - offeredAt) < 72 * 3600e3\n          && new Date(o.selected_slot).getTime() > Date.now();\n  if (ok) selected_slot = o.selected_slot;\n  else errors.push('selected_slot rejected (not in current offered list)');\n}\nconst preferred_date = /^\\d{4}-\\d{2}-\\d{2}$/.test(o.preferred_date || '') ? o.preferred_date : null;\nconst preferred_time = /^\\d{2}:\\d{2}$/.test(o.preferred_time || '') ? o.preferred_time : null;\n\nreturn [{ json: {\n  action, model_action: o.action || null, confidence, overridden, sentiment,\n  reason: o.reason || null,\n  selected_slot, preferred_date, preferred_time,\n  emergency_criteria_matched: action === 'EMERGENCY' ? o.emergency_criteria_matched : null,\n  handoff_reason: o.handoff_reason || overridden || o.reason || null,\n  valid, errors\n}}];"
+      },
+      "id": "005f567e-ae01-4533-9180-6a5bdccb524c",
+      "name": "VALIDATE_ROUTER_OUTPUT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ai_interactions (organization_id, lead_id, conversation_id, workflow, model, input, output,\n                             action, confidence, valid, error, prompt_tokens, completion_tokens)\nVALUES ($1::uuid, $2::uuid, NULLIF($3::text,'')::uuid, $4::text, $5::text, $6::jsonb, $7::jsonb,\n        NULLIF($8::text,''), $9::numeric, $10::boolean, NULLIF($11::text,''), $12::int, $13::int)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.org.id, $('GET_LEAD').first().json.lead.id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.conversation_id || '', '04_AI_ROUTER', $('PARSE_JSON').first().json.model || $('PREPARE_ROUTER_INPUT').first().json.openai_request.model, JSON.stringify($('PREPARE_ROUTER_INPUT').first().json.openai_request.messages.slice(1)), JSON.stringify($('VALIDATE_ROUTER_OUTPUT').first().json), $('VALIDATE_ROUTER_OUTPUT').first().json.action || '', $('VALIDATE_ROUTER_OUTPUT').first().json.confidence ?? null, $('VALIDATE_ROUTER_OUTPUT').first().json.valid, ($('VALIDATE_ROUTER_OUTPUT').first().json.errors || []).join('; '), $('PARSE_JSON').first().json.prompt_tokens, $('PARSE_JSON').first().json.completion_tokens ] }}"
+        }
+      },
+      "id": "45097c19-56c2-4dcc-8f3a-e134b40bbff3",
+      "name": "SAVE_AI_INTERACTION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "24d06acf-d59a-433b-8f77-970d8b335ea1",
+                    "leftValue": "={{ $('VALIDATE_ROUTER_OUTPUT').first().json.action }}",
+                    "rightValue": "ANSWER",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ANSWER"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "1f0e5026-a040-4b39-b063-ae996be3c51b",
+                    "leftValue": "={{ $('VALIDATE_ROUTER_OUTPUT').first().json.action }}",
+                    "rightValue": "QUALIFY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "QUALIFY"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "c9e5dfbd-3b2e-48bf-8f95-d38c5c1c6177",
+                    "leftValue": "={{ $('VALIDATE_ROUTER_OUTPUT').first().json.action }}",
+                    "rightValue": "BOOK",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "BOOK"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "7993f4e0-5600-4c47-a6a5-94553827506f",
+                    "leftValue": "={{ $('VALIDATE_ROUTER_OUTPUT').first().json.action }}",
+                    "rightValue": "RESCHEDULE",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "RESCHEDULE"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "f2cc36e9-2c95-4760-bff1-bab048633e80",
+                    "leftValue": "={{ $('VALIDATE_ROUTER_OUTPUT').first().json.action }}",
+                    "rightValue": "HUMAN",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "HUMAN"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "5d3f1660-8d15-4d96-b05b-860b024068cb",
+                    "leftValue": "={{ $('VALIDATE_ROUTER_OUTPUT').first().json.action }}",
+                    "rightValue": "STOP",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "STOP"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "ab0cdfa0-d18f-472c-a3b2-5a22da14d729",
+                    "leftValue": "={{ $('VALIDATE_ROUTER_OUTPUT').first().json.action }}",
+                    "rightValue": "EMERGENCY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "EMERGENCY"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "995518f1-4db7-42f4-9eb2-097a58f99588",
+      "name": "SWITCH_ACTION",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, mode: 'ANSWER', router_reason: v.reason } }];"
+      },
+      "id": "38360ed8-64f5-43a2-b9e0-4344e5dba6f2",
+      "name": "PREP_ANSWER",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, mode: 'ROUTE' } }];"
+      },
+      "id": "9b3f21e2-1f0a-4a98-baf5-57e6ec17f756",
+      "name": "PREP_QUALIFY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "aa54b366-3f70-4204-bcce-06590367fcf0",
+      "name": "EXECUTE_06_ANSWER",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__05__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "d2c96b65-e2a7-43a3-91a9-c7a525c16239",
+      "name": "EXECUTE_05_QUALIFICATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3620,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, mode: 'SCORE_ONLY',\n  reschedule: v.action === 'RESCHEDULE', selected_slot: v.selected_slot,\n  preferred_date: v.preferred_date, preferred_time: v.preferred_time } }];"
+      },
+      "id": "3a8b667e-53fd-42d3-9ab8-d4c33772652a",
+      "name": "PREP_BOOKING",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__05__"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "4326ce3e-9704-4948-9585-fb4a52d1688d",
+      "name": "SCORE_LEAD_IN_BACKGROUND",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3620,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "26bfd3bd-8ed6-47e4-bd09-10b01b7eac47",
+              "leftValue": "={{ !!$json.selected_slot }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8c3d0ecf-143c-4694-9d4b-32560bad6eb2",
+      "name": "HAS_VALID_SLOT?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3620,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $json.lead_id, conversation_id: $json.conversation_id, channel: $json.channel, slot: $json.selected_slot, reschedule: $json.reschedule, source: 'router' } }];"
+      },
+      "id": "da89b3d6-9a51-4af9-8283-51229ebb9d1a",
+      "name": "PREP_BOOK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__10__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "2c574672-f544-4e88-903f-4189bc1b36c8",
+      "name": "EXECUTE_10_BOOK_APPOINTMENT",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "d117c6d1-5d6a-4057-9c04-62784fe8bb4c",
+              "leftValue": "={{ $json.booked === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "662ed7b4-e054-4af5-b8eb-51dfbe5029cf",
+      "name": "BOOKED?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nconst alts = $json.alternatives || [];\nreturn [{ json: { ...base, mode: alts.length ? 'OFFER_SLOTS' : 'NO_SLOTS', slots: alts } }];"
+      },
+      "id": "09534b34-b7bd-4dcf-8843-f09cf7a3fb14",
+      "name": "PREP_OFFER_ALTERNATIVES",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $json.lead_id, preferred_date: $json.preferred_date, preferred_time: $json.preferred_time } }];"
+      },
+      "id": "8e72daa3-f7d9-44dc-96a4-30a0607edefd",
+      "name": "PREP_AVAILABILITY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3880,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__09__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "8be691de-9fdf-4940-9175-22648f085fc3",
+      "name": "EXECUTE_09_AVAILABILITY",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4140,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nconst slots = $json.available_slots || [];\nreturn [{ json: { ...base, mode: slots.length ? 'OFFER_SLOTS' : 'NO_SLOTS', slots } }];"
+      },
+      "id": "6f790a18-a1e4-4a87-9b0f-baf57cc1a72c",
+      "name": "PREP_OFFER_SLOTS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "499ad38c-3016-4966-abf2-b9d78592ee51",
+      "name": "EXECUTE_06_OFFER_SLOTS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, reason: v.handoff_reason || 'Customer needs a person', priority: 'NORMAL', notify_customer: true } }];"
+      },
+      "id": "68324a24-feb5-40a4-9f2c-b9e7bb828059",
+      "name": "PREP_HUMAN",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, reason: 'EMERGENCY: ' + v.emergency_criteria_matched, priority: 'EMERGENCY', notify_customer: true } }];"
+      },
+      "id": "d2a81675-4e0b-4808-9e7c-a7679276b0e4",
+      "name": "PREP_EMERGENCY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        1020
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__15__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "d064f56f-48ec-4b4c-848e-efd8ed521fa9",
+      "name": "EXECUTE_15_HUMAN_HANDOFF",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3620,
+        1020
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE_ROUTER_OUTPUT').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { lead_id: t.lead_id, organization_id: t.organization_id, channel: t.channel, body: t.body, action: 'OPT_OUT', source: 'ai_router' } }];"
+      },
+      "id": "94fe7225-c77c-4af2-8d74-f35d07ad511e",
+      "name": "PREP_STOP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__21__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "c837ecd4-7a2e-498a-91f3-c0836e28fc17",
+      "name": "EXECUTE_21_CONSENT",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3620,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 04 · AI Router — *AI decides, n8n executes*\nThe model only returns a JSON decision. `VALIDATE_ROUTER_OUTPUT` enforces:\nallowed actions · confidence 0–1 · low confidence → HUMAN · EMERGENCY only with a configured criterion ·\na slot is accepted only if we offered it in the last 72h.\nEvery decision is stored in `ai_interactions`.",
+        "width": 600,
+        "height": 260
+      },
+      "id": "99548576-790c-4b6d-a081-e2ce32146b01",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_LEAD": {
+      "main": [
+        [
+          {
+            "node": "GET_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "GET_RECENT_MESSAGES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_RECENT_MESSAGES": {
+      "main": [
+        [
+          {
+            "node": "GET_COMPANY_RULES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_COMPANY_RULES": {
+      "main": [
+        [
+          {
+            "node": "AI_ALLOWED?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI_ALLOWED?": {
+      "main": [
+        [
+          {
+            "node": "PREPARE_ROUTER_INPUT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_AI_PAUSED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREPARE_ROUTER_INPUT": {
+      "main": [
+        [
+          {
+            "node": "OPENAI_ROUTER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OPENAI_ROUTER": {
+      "main": [
+        [
+          {
+            "node": "PARSE_JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_JSON": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_ROUTER_OUTPUT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_ROUTER_OUTPUT": {
+      "main": [
+        [
+          {
+            "node": "SAVE_AI_INTERACTION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_AI_INTERACTION": {
+      "main": [
+        [
+          {
+            "node": "SWITCH_ACTION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SWITCH_ACTION": {
+      "main": [
+        [
+          {
+            "node": "PREP_ANSWER",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_QUALIFY",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_BOOKING",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_BOOKING",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_HUMAN",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_STOP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_EMERGENCY",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_HUMAN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_ANSWER": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_ANSWER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_QUALIFY": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_05_QUALIFICATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_BOOKING": {
+      "main": [
+        [
+          {
+            "node": "SCORE_LEAD_IN_BACKGROUND",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HAS_VALID_SLOT?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HAS_VALID_SLOT?": {
+      "main": [
+        [
+          {
+            "node": "PREP_BOOK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_BOOK": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_10_BOOK_APPOINTMENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_10_BOOK_APPOINTMENT": {
+      "main": [
+        [
+          {
+            "node": "BOOKED?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BOOKED?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "PREP_OFFER_ALTERNATIVES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_OFFER_ALTERNATIVES": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_OFFER_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_09_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_09_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "PREP_OFFER_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_OFFER_SLOTS": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_OFFER_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_STOP": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_21_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_HUMAN": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_15_HUMAN_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_EMERGENCY": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_15_HUMAN_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "04",
+    "description": "Decides the next action (ANSWER/QUALIFY/BOOK/RESCHEDULE/HUMAN/STOP/EMERGENCY); n8n executes it deterministically"
+  }
+}

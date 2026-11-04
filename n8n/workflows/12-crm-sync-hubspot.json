@@ -1,0 +1,586 @@
+{
+  "name": "RR 12 · CRM Sync (HubSpot)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "f33e43f0-e94d-4ed6-a4c3-0a440c05ba8c",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT to_jsonb(l.*) AS lead, o.settings->'crm' AS crm, o.timezone,\n       (SELECT to_jsonb(d.*) FROM deals d WHERE d.lead_id = l.id ORDER BY d.created_at DESC LIMIT 1) AS deal,\n       (SELECT to_jsonb(a.*) FROM appointments a WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED')\n         ORDER BY a.start_at LIMIT 1) AS appointment\nFROM leads l JOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "118bec85-a57c-415f-94a7-3a0826e84ce8",
+      "name": "GET_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "0e02e7f1-b7b3-4fef-9136-fca2ce608f7b",
+              "leftValue": "={{ $json.crm && $json.crm.enabled === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "885c6747-4d12-4124-a387-0a1ec2a5a138",
+      "name": "CRM_ENABLED?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 'crm_disabled' AS result;",
+        "options": {}
+      },
+      "id": "3981f4f3-a183-44e8-8986-1741ccc7e658",
+      "name": "LOG_CRM_DISABLED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const { lead, crm, deal, appointment, timezone } = $json;\nconst [firstname, ...rest] = (lead.name || '').trim().split(/\\s+/);\nconst props = {\n  firstname: firstname || null, lastname: rest.join(' ') || null,\n  phone: lead.phone, email: lead.email, address: lead.address,\n  lifecyclestage: lead.status === 'BOOKED' ? 'opportunity' : 'lead'\n};\nif (crm.custom_properties) Object.assign(props, {\n  roofradar_lead_score: lead.lead_score,\n  roofradar_qualification_status: lead.qualification_status,\n  roofradar_source: lead.source,\n  roofradar_status: lead.status,\n  roofradar_appointment: appointment ? DateTime.fromISO(appointment.start_at).setZone(timezone).toFormat('yyyy-LL-dd HH:mm') : null\n});\nObject.keys(props).forEach(k => (props[k] === null || props[k] === undefined || props[k] === '') && delete props[k]);\nconst filterGroups = [];\nif (lead.phone) filterGroups.push({ filters: [{ propertyName: 'phone', operator: 'EQ', value: lead.phone }] });\nif (lead.email) filterGroups.push({ filters: [{ propertyName: 'email', operator: 'EQ', value: lead.email }] });\nreturn [{ json: {\n  lead_id: lead.id, crm_contact_id: lead.crm_contact_id, props, filterGroups,\n  deal_id: deal?.id || null, crm_deal_id: deal?.crm_deal_id || null,\n  deal_props: deal ? {\n    dealname: `Roof inspection — ${lead.name || lead.phone}`,\n    pipeline: crm.pipeline || 'default',\n    dealstage: (crm.stage_map || {})[deal.stage] || 'appointmentscheduled'\n  } : null\n}}];"
+      },
+      "id": "fa8ef578-69fc-470d-aba6-c8f48f8bee28",
+      "name": "MAP_CRM_FIELDS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: $json.filterGroups, limit: 1, properties: ['phone','email'] }) }}"
+      },
+      "id": "c50f9bd8-b0f0-4bfa-85d5-5c859fafac91",
+      "name": "FIND_CRM_CONTACT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "__CRED_HUBSPOT_ID__",
+          "name": "RoofRadar HubSpot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "4f7e5368-96ca-421c-a64a-aad885ff1c78",
+              "leftValue": "={{ ($json.total || 0) > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "938adaa9-fe09-4118-8e9a-9bf8903e75b8",
+      "name": "CONTACT_EXISTS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.hubapi.com/crm/v3/objects/contacts/{{ $json.results[0].id }}",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('MAP_CRM_FIELDS').first().json.props }) }}"
+      },
+      "id": "dd95ac22-6b7d-49f6-a411-6768fad5cd36",
+      "name": "UPDATE_CRM_CONTACT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "__CRED_HUBSPOT_ID__",
+          "name": "RoofRadar HubSpot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('MAP_CRM_FIELDS').first().json.props }) }}"
+      },
+      "id": "b0f19af3-906b-453b-96e1-d35c80ea0f62",
+      "name": "CREATE_CRM_CONTACT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        480
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "__CRED_HUBSPOT_ID__",
+          "name": "RoofRadar HubSpot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { contact_id: String($json.id), deal_action: $('MAP_CRM_FIELDS').first().json.deal_props ? ($('MAP_CRM_FIELDS').first().json.crm_deal_id ? 'UPDATE' : 'CREATE') : 'NONE' } }];"
+      },
+      "id": "2ae5d98a-ff76-4270-b4bc-b27395d17c1b",
+      "name": "CONTACT_ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "942dedb0-16d2-4a73-a88d-96bf42eb4554",
+                    "leftValue": "={{ $json.deal_action }}",
+                    "rightValue": "CREATE",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "CREATE"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "40a8ad37-a043-4be7-b1ce-4c96e81137a4",
+                    "leftValue": "={{ $json.deal_action }}",
+                    "rightValue": "UPDATE",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "UPDATE"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "b97a2739-bd99-4057-8b22-c18fa9a8ed6b",
+      "name": "UPSERT_CRM_DEAL",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('MAP_CRM_FIELDS').first().json.deal_props, associations: [{ to: { id: $json.contact_id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }] }] }) }}"
+      },
+      "id": "e19a2f99-78d1-49dc-9fba-8b0d9d945d5d",
+      "name": "CREATE_CRM_DEAL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "__CRED_HUBSPOT_ID__",
+          "name": "RoofRadar HubSpot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.hubapi.com/crm/v3/objects/deals/{{ $('MAP_CRM_FIELDS').first().json.crm_deal_id }}",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('MAP_CRM_FIELDS').first().json.deal_props }) }}"
+      },
+      "id": "f9158df3-4021-4261-9cd5-739331e47f71",
+      "name": "UPDATE_CRM_DEAL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        480
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "__CRED_HUBSPOT_ID__",
+          "name": "RoofRadar HubSpot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH l AS (UPDATE leads SET crm_contact_id = $2::text WHERE id = $1::uuid RETURNING organization_id),\n     d AS (UPDATE deals SET crm_deal_id = COALESCE(crm_deal_id, NULLIF($4::text,'')) WHERE id = NULLIF($3::text,'')::uuid RETURNING id)\nINSERT INTO activities (organization_id, lead_id, type, description, metadata)\nSELECT organization_id, $1::uuid, 'CRM_SYNC', 'HubSpot contact/deal upserted',\n       jsonb_build_object('contact_id', $2::text, 'deal_id', NULLIF($4::text,''))\nFROM l RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('MAP_CRM_FIELDS').first().json.lead_id, $('CONTACT_ID').first().json.contact_id, $('MAP_CRM_FIELDS').first().json.deal_id || '', ($json.id ? String($json.id) : ($('MAP_CRM_FIELDS').first().json.crm_deal_id || '')) ] }}"
+        }
+      },
+      "id": "706b8080-3b4b-4d11-bf99-44ce2f5e9dd8",
+      "name": "LOG_CRM_SYNC",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 12 · CRM Sync\nEnable with `settings.crm.enabled=true`. Uses HubSpot private-app token.\nSet `settings.crm.custom_properties=true` after creating the `roofradar_*` contact properties in HubSpot.\nCalled fire-and-forget from 10, 24B — a CRM outage never blocks a customer.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "45ce60e5-1d1a-4251-ba7a-146bd44d8108",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_LEAD": {
+      "main": [
+        [
+          {
+            "node": "CRM_ENABLED?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM_ENABLED?": {
+      "main": [
+        [
+          {
+            "node": "MAP_CRM_FIELDS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_CRM_DISABLED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MAP_CRM_FIELDS": {
+      "main": [
+        [
+          {
+            "node": "FIND_CRM_CONTACT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_CRM_CONTACT": {
+      "main": [
+        [
+          {
+            "node": "CONTACT_EXISTS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONTACT_EXISTS?": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_CRM_CONTACT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CREATE_CRM_CONTACT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_CRM_CONTACT": {
+      "main": [
+        [
+          {
+            "node": "CONTACT_ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_CRM_CONTACT": {
+      "main": [
+        [
+          {
+            "node": "CONTACT_ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONTACT_ID": {
+      "main": [
+        [
+          {
+            "node": "UPSERT_CRM_DEAL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPSERT_CRM_DEAL": {
+      "main": [
+        [
+          {
+            "node": "CREATE_CRM_DEAL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "UPDATE_CRM_DEAL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_CRM_SYNC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_CRM_DEAL": {
+      "main": [
+        [
+          {
+            "node": "LOG_CRM_SYNC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_CRM_DEAL": {
+      "main": [
+        [
+          {
+            "node": "LOG_CRM_SYNC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "12",
+    "description": "Mirror lead + deal to HubSpot. Postgres stays the source of truth; CRM failures never block a booking"
+  }
+}

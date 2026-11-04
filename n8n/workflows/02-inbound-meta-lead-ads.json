@@ -1,0 +1,708 @@
+{
+  "name": "RR 02 · Inbound Meta Lead Ads",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "roofradar/meta",
+        "options": {},
+        "responseMode": "responseNode"
+      },
+      "id": "52e52f0b-9c78-44da-a8b8-e6dc0f3085af",
+      "name": "META_VERIFY_WEBHOOK",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "229a34f8-fc9c-4983-9ae3-1293d12ddef5"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT settings->'meta'->>'verify_token' AS token\nFROM organizations WHERE settings->'meta'->>'verify_token' = $1::text LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.query['hub.verify_token'] || '' ] }}"
+        }
+      },
+      "id": "a1b48683-d5ce-4e06-b164-9d958b976c57",
+      "name": "GET_VERIFY_TOKEN",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "7bfe4818-4e99-4ec8-958f-278b9eb0d2e1",
+              "leftValue": "={{ !!$json.token && $('META_VERIFY_WEBHOOK').first().json.query['hub.mode'] === 'subscribe' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "334f1711-a0e9-4655-9464-2c05677521fe",
+      "name": "TOKEN_MATCHES?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $('META_VERIFY_WEBHOOK').first().json.query['hub.challenge'] }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain"
+              }
+            ]
+          }
+        }
+      },
+      "id": "e958e1b6-6d89-4f19-9f51-1d80f64f3be2",
+      "name": "RESPOND_CHALLENGE",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "forbidden",
+        "options": {
+          "responseCode": 403,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain"
+              }
+            ]
+          }
+        }
+      },
+      "id": "91cb414d-8d67-4780-aeeb-6b0cc3694b9e",
+      "name": "RESPOND_FORBIDDEN",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1020,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "roofradar/meta",
+        "options": {}
+      },
+      "id": "55e7cb82-9ae2-4e16-85c3-9bc602f8f087",
+      "name": "META_LEAD_TRIGGER",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        480
+      ],
+      "webhookId": "ba38e1f9-3cb8-4ee1-89ca-ed6bab633ebf"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\nconst out = [];\nfor (const entry of body.entry || []) {\n  for (const ch of entry.changes || []) {\n    if (ch.field === 'leadgen' && ch.value?.leadgen_id) {\n      out.push({ json: {\n        leadgen_id: String(ch.value.leadgen_id),\n        page_id: String(ch.value.page_id || entry.id || ''),\n        form_id: ch.value.form_id ? String(ch.value.form_id) : null,\n        ad_id: ch.value.ad_id ? String(ch.value.ad_id) : null\n      }});\n    }\n  }\n}\nreturn out;   // zero items → workflow ends quietly"
+      },
+      "id": "f81b374b-b3b8-45ce-b8a4-81b7c9667df2",
+      "name": "EXTRACT_LEADGEN_IDS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, settings FROM organizations\nWHERE settings->'meta'->>'page_id' = $1::text AND active LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.page_id ] }}"
+        }
+      },
+      "id": "cb1d2472-d413-493b-b649-b2c82f8b3fd8",
+      "name": "RESOLVE_ORG",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v23.0/{{ $('EXTRACT_LEADGEN_IDS').item.json.leadgen_id }}",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,created_time,field_data,form_id,ad_id"
+            }
+          ]
+        }
+      },
+      "id": "b1925e17-0af2-4331-9b78-f8cb99b86fa0",
+      "name": "GET_META_LEAD",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1020,
+        660
+      ],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "__CRED_META_ID__",
+          "name": "RoofRadar Meta"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// E.164 normaliser. Assumes US/Canada (+1) when a bare 10/11-digit number arrives.\nfunction normalizePhone(phone) {\n  if (!phone) return null;\n  let p = String(phone).trim().replace(/^whatsapp:/i, '').replace(/[^\\d+]/g, '');\n  if (p.startsWith('00')) p = '+' + p.substring(2);\n  if (!p.startsWith('+') && p.length === 10) p = '+1' + p;\n  if (!p.startsWith('+') && p.length === 11 && p.startsWith('1')) p = '+' + p;\n  return /^\\+[1-9]\\d{7,14}$/.test(p) ? p : null;\n}\n\nconst fields = {};\nfor (const f of $json.field_data || []) fields[f.name] = f.values?.[0] ?? null;\nconst email = fields.email ? String(fields.email).toLowerCase().trim() : null;\nconst phone_e164 = normalizePhone(fields.phone_number || fields.phone);\nconst name = fields.full_name || [fields.first_name, fields.last_name].filter(Boolean).join(' ') || fields.name || null;\nconst org = $('RESOLVE_ORG').item.json;\nconst consent = !!(org.settings?.meta?.sms_consent_in_form);\nreturn { json: {\n  external_id: String($json.id),\n  name, email, phone_e164,\n  address: fields.street_address || fields.address || [fields.city, fields.state].filter(Boolean).join(', ') || null,\n  problem_type: fields.problem_type || fields['what_do_you_need_help_with?'] || null,\n  message: fields.message || fields.details || null,\n  source: 'facebook',\n  received_at: $json.created_time,\n  sms_consent: consent,\n  consent_text: consent ? 'Meta lead form consent disclaimer' : null,\n  valid: !!name && (!!phone_e164 || !!email)\n}};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "ab3e60f5-6863-417e-b559-35e1df8111c4",
+      "name": "NORMALIZE_META_LEAD",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "372e3404-74e4-4299-9d66-fc1d78515397",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "afb3d61e-a031-4825-a148-0f508bb53329",
+      "name": "VALIDATE",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, NULL, '02_INBOUND_META', 'INVALID_LEAD', $2::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').item.json.id, JSON.stringify($json) ] }}"
+        }
+      },
+      "id": "b663655e-aac3-49bb-a7d1-9c1698e403a3",
+      "name": "LOG_INVALID_META_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM leads\nWHERE organization_id = $1::uuid\n  AND (\n        phone = $2::text\n     OR ($3::text IS NOT NULL AND lower(email) = lower($3::text))\n     OR ($4::text IS NOT NULL AND external_id = $4::text)\n  )\nORDER BY (phone = $2::text) DESC NULLS LAST, created_at\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').item.json.id, $('NORMALIZE_META_LEAD').item.json.phone_e164, $('NORMALIZE_META_LEAD').item.json.email, $('NORMALIZE_META_LEAD').item.json.external_id ] }}"
+        }
+      },
+      "id": "363f17bc-cc7b-4417-8c15-177021b56a1a",
+      "name": "FIND_EXISTING_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "bf6a2cc0-b8c8-42c7-ab0f-97bb4e4dd05b",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b4bf675b-ee69-415e-8fc2-94022c04b2b0",
+      "name": "LEAD_EXISTS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET\n  name         = COALESCE(NULLIF($2::text,''), name),\n  email        = COALESCE(NULLIF($3::text,''), email),\n  address      = COALESCE(NULLIF($4::text,''), address),\n  problem_type = COALESCE(NULLIF($5::text,''), problem_type),\n  phone        = COALESCE(phone, NULLIF($6::text,'')),\n  external_id  = COALESCE(external_id, NULLIF($8::text,'')),\n  first_message = COALESCE(first_message, NULLIF($7::text,'')),\n  metadata     = metadata || jsonb_build_object('last_form_message', $7::text, 'last_form_at', NOW()),\n  status       = CASE WHEN status IN ('LOST','DISQUALIFIED') THEN 'NEW' ELSE status END\nWHERE id = $1::uuid\nRETURNING *, false AS is_new;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('NORMALIZE_META_LEAD').item.json.name, $('NORMALIZE_META_LEAD').item.json.email, $('NORMALIZE_META_LEAD').item.json.address, $('NORMALIZE_META_LEAD').item.json.problem_type, $('NORMALIZE_META_LEAD').item.json.phone_e164, $('NORMALIZE_META_LEAD').item.json.message, $('NORMALIZE_META_LEAD').item.json.external_id ] }}"
+        }
+      },
+      "id": "7af79403-1da8-41c6-be40-bc74bf9b323c",
+      "name": "UPDATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (organization_id, name, phone, email, address, source, problem_type,\n                   first_message, external_id, status, preferred_channel)\nVALUES ($1::uuid, NULLIF($2::text,''), NULLIF($3::text,''), NULLIF($4::text,''), NULLIF($5::text,''),\n        $6::text, NULLIF($7::text,''), NULLIF($8::text,''), NULLIF($9::text,''), 'NEW', 'sms')\nON CONFLICT (organization_id, phone) WHERE phone IS NOT NULL\nDO UPDATE SET updated_at = NOW()\nRETURNING *, (xmax = 0) AS is_new;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').item.json.id, $('NORMALIZE_META_LEAD').item.json.name, $('NORMALIZE_META_LEAD').item.json.phone_e164, $('NORMALIZE_META_LEAD').item.json.email, $('NORMALIZE_META_LEAD').item.json.address, 'facebook', $('NORMALIZE_META_LEAD').item.json.problem_type, $('NORMALIZE_META_LEAD').item.json.message, $('NORMALIZE_META_LEAD').item.json.external_id ] }}"
+        }
+      },
+      "id": "6faffbcb-6259-4e97-9ad9-85dd76f62f84",
+      "name": "CREATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH c AS (\n  INSERT INTO consents (lead_id, channel, consent_status, source, metadata)\n  SELECT $1::uuid, 'sms', 'OPTED_IN', $3::text, jsonb_build_object('disclosure', $4::text)\n  WHERE $2::boolean\n  RETURNING id\n), n AS (\n  SELECT CASE WHEN $5::boolean THEN rr_schedule_nurture($1::uuid) ELSE 0 END AS scheduled\n), e AS (\n  SELECT rr_log_event($6::uuid, $1::uuid, $7::text,\n         CASE WHEN $5::boolean THEN 'LEAD_CREATED' ELSE 'LEAD_UPDATED' END, $8::jsonb) AS event_id\n)\nSELECT $1::uuid AS lead_id, $6::uuid AS organization_id, $5::boolean AS is_new,\n       (SELECT scheduled FROM n) AS followups_scheduled,\n       (SELECT count(*) FROM c)::int AS consent_rows,\n       (SELECT event_id FROM e) AS event_id,\n       rr_can_contact($1::uuid, 'sms') AS can_contact;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('NORMALIZE_META_LEAD').item.json.sms_consent, 'meta_lead_form', $('NORMALIZE_META_LEAD').item.json.consent_text || '', $json.is_new, $json.organization_id, '02_INBOUND_META', JSON.stringify({source: 'facebook', problem_type: $('NORMALIZE_META_LEAD').item.json.problem_type, message: $('NORMALIZE_META_LEAD').item.json.message}) ] }}"
+        }
+      },
+      "id": "d3be3a39-be99-47fc-95f6-9cfabda03519",
+      "name": "LOG_EVENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "743ba8ce-c266-4705-bc37-1af6618dc1e2",
+              "leftValue": "={{ $json.is_new && $json.can_contact && !!$('NORMALIZE_META_LEAD').item.json.phone_e164 && ($('NORMALIZE_META_LEAD').item.json.sms_consent) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dba44847-291f-43f1-bb92-cd5c43d816e4",
+      "name": "SHOULD_TEXT_NOW?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: {\n  lead_id: $json.lead_id,\n  organization_id: $json.organization_id,\n  channel: 'sms',\n  mode: 'FIRST_CONTACT',\n  inbound_text: $('NORMALIZE_META_LEAD').item.json.message || null\n}};",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "16b8485f-c21a-49f7-997c-866b431a4056",
+      "name": "PREP_FIRST_CONTACT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "a7ebe7a7-2a09-4d8b-b844-161999acefc7",
+      "name": "EXECUTE_06_AI_CONVERSATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 02 · Inbound Meta\nSubscribe your Page to the **leadgen** webhook field and point it at `/webhook/roofradar/meta`\n(GET = verification using `settings.meta.verify_token`, POST = lead events).\nThe payload only carries a `leadgen_id`; we fetch the real lead from the Graph API with *our* token,\nso a forged webhook cannot inject data. Set `settings.meta.sms_consent_in_form=true` only if your\nform includes an SMS consent disclaimer.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "66835d0f-0048-4758-b469-70c431ce7ea2",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "META_VERIFY_WEBHOOK": {
+      "main": [
+        [
+          {
+            "node": "GET_VERIFY_TOKEN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_VERIFY_TOKEN": {
+      "main": [
+        [
+          {
+            "node": "TOKEN_MATCHES?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TOKEN_MATCHES?": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_CHALLENGE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RESPOND_FORBIDDEN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "META_LEAD_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "EXTRACT_LEADGEN_IDS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXTRACT_LEADGEN_IDS": {
+      "main": [
+        [
+          {
+            "node": "RESOLVE_ORG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESOLVE_ORG": {
+      "main": [
+        [
+          {
+            "node": "GET_META_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_META_LEAD": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE_META_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE_META_LEAD": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE": {
+      "main": [
+        [
+          {
+            "node": "FIND_EXISTING_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_INVALID_META_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_EXISTING_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LEAD_EXISTS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LEAD_EXISTS?": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CREATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LOG_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LOG_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_EVENT": {
+      "main": [
+        [
+          {
+            "node": "SHOULD_TEXT_NOW?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHOULD_TEXT_NOW?": {
+      "main": [
+        [
+          {
+            "node": "PREP_FIRST_CONTACT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_FIRST_CONTACT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "02",
+    "description": "Facebook/Instagram lead ads webhook → Graph API fetch → same duplicate logic as 01"
+  }
+}

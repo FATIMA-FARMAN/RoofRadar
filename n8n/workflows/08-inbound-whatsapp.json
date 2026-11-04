@@ -1,0 +1,898 @@
+{
+  "name": "RR 08 · Inbound WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "roofradar/whatsapp",
+        "options": {},
+        "responseMode": "responseNode",
+        "authentication": "basicAuth"
+      },
+      "id": "f696ab8f-993a-4dac-9a21-73ffca09e451",
+      "name": "TWILIO_WHATSAPP_INBOUND",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "__CRED_TWILIO_HOOK_ID__",
+          "name": "RoofRadar Twilio Webhook Auth"
+        }
+      },
+      "webhookId": "a2fbe74e-584d-46ea-bc9e-4b7f4bfbe52b"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<Response></Response>",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "6a1808b4-889d-401b-9895-6f4ffa6a95f9",
+      "name": "RESPOND_TWIML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// E.164 normaliser. Assumes US/Canada (+1) when a bare 10/11-digit number arrives.\nfunction normalizePhone(phone) {\n  if (!phone) return null;\n  let p = String(phone).trim().replace(/^whatsapp:/i, '').replace(/[^\\d+]/g, '');\n  if (p.startsWith('00')) p = '+' + p.substring(2);\n  if (!p.startsWith('+') && p.length === 10) p = '+1' + p;\n  if (!p.startsWith('+') && p.length === 11 && p.startsWith('1')) p = '+' + p;\n  return /^\\+[1-9]\\d{7,14}$/.test(p) ? p : null;\n}\n\nconst b = $json.body ?? $json;\nconst media = Number(b.NumMedia || 0);\nreturn [{ json: {\n  message_sid: b.MessageSid || b.SmsSid || null,\n  phone_e164: normalizePhone(b.From),\n  business_phone: normalizePhone(b.To),\n  body: (b.Body || '').trim() || (media ? '[media message]' : ''),\n  num_media: media,\n  media_url: b.MediaUrl0 || null,\n  profile_name: b.ProfileName || null,\n  channel: 'whatsapp',\n  received_at: new Date().toISOString()\n}}];"
+      },
+      "id": "7c5ae591-1e75-4d5b-a1b3-ea7a664b4e72",
+      "name": "NORMALIZE_WHATSAPP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "f8851f2e-15c6-49db-9eaf-ae4bbd900629",
+              "leftValue": "={{ !!$json.phone_e164 && !!$json.message_sid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8eaf088b-195e-43a2-b3f7-0c2c06a8620f",
+      "name": "VALID_SENDER?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, settings, business_phone, whatsapp_number FROM organizations\nWHERE active AND (business_phone = $1::text OR whatsapp_number = $1::text)\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.business_phone ] }}"
+        }
+      },
+      "id": "a726e678-b96c-4003-99b2-f69117bfd6e3",
+      "name": "RESOLVE_ORG",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM leads WHERE organization_id = $1::uuid AND phone = $2::text LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('NORMALIZE_WHATSAPP').first().json.phone_e164 ] }}"
+        }
+      },
+      "id": "0982bc52-a9a4-42ea-91c8-41130eddd318",
+      "name": "FIND_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "208f2b3a-480d-4aa4-8fd2-777ffea6b754",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "50aa14ad-53f0-448f-b883-443a4eacc11b",
+      "name": "LEAD_FOUND?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (organization_id, phone, name, source, status, preferred_channel, first_message)\nVALUES ($1::uuid, $2::text, NULLIF($3::text,''), $4::text, 'NEW', $4::text, $5::text)\nON CONFLICT (organization_id, phone) WHERE phone IS NOT NULL\nDO UPDATE SET updated_at = NOW()\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').first().json.id, $('NORMALIZE_WHATSAPP').first().json.phone_e164, $('NORMALIZE_WHATSAPP').first().json.profile_name || '', 'whatsapp', $('NORMALIZE_WHATSAPP').first().json.body ] }}"
+        }
+      },
+      "id": "d8c39214-69eb-4bc4-abf6-cfcd13d4a77f",
+      "name": "CREATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();  // single merge point: found or created lead row"
+      },
+      "id": "2051958d-da2d-4b11-80a0-e6f64a4912aa",
+      "name": "LEAD_READY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM conversations\nWHERE lead_id = $1::uuid AND channel = $2::text AND status = 'ACTIVE'\nORDER BY last_message_at DESC LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, 'whatsapp' ] }}"
+        }
+      },
+      "id": "46c39270-7e0c-4b9d-a189-4ee34bd19f6b",
+      "name": "FIND_CONVERSATION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "3e29973b-569b-46db-aa2b-a59e4adfc0c4",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e58d7604-3a2a-44a6-bc96-2d5c9c741537",
+      "name": "CONVERSATION_EXISTS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO conversations (organization_id, lead_id, channel, status, ai_active, last_message_at)\nVALUES ($1::uuid, $2::uuid, $3::text, 'ACTIVE', true, NOW())\nON CONFLICT (lead_id, channel) WHERE status = 'ACTIVE'\nDO UPDATE SET last_message_at = NOW()\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').first().json.id, $('LEAD_READY').first().json.id, 'whatsapp' ] }}"
+        }
+      },
+      "id": "ba0eea89-c94a-4c6c-9f36-d5789d0acc91",
+      "name": "CREATE_CONVERSATION_IF_NEEDED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3100,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH m AS (\n  INSERT INTO messages (organization_id, conversation_id, lead_id, external_message_id, direction,\n                        channel, sender, recipient, body, ai_generated, delivery_status, metadata)\n  VALUES ($1::uuid, $2::uuid, $3::uuid, $4::text, 'INBOUND', $5::text, $6::text, $7::text, $8::text,\n          false, 'RECEIVED', $9::jsonb)\n  ON CONFLICT (external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING\n  RETURNING *\n), l AS (\n  UPDATE leads SET last_message_at = NOW(), last_inbound_at = NOW(),\n         status = CASE WHEN status IN ('NEW','CONTACTED') THEN 'ENGAGED' ELSE status END\n  WHERE id = $3::uuid AND EXISTS (SELECT 1 FROM m) RETURNING id\n), c AS (\n  UPDATE conversations SET last_message_at = NOW()\n  WHERE id = $2::uuid AND EXISTS (SELECT 1 FROM m) RETURNING id\n), f AS (   -- customer is talking: restart the nurture clock from step 2\n  SELECT rr_schedule_nurture($3::uuid, NOW(), 2) AS n WHERE EXISTS (SELECT 1 FROM m)\n)\nSELECT m.*, (SELECT count(*) FROM l) + (SELECT count(*) FROM c) + coalesce((SELECT n FROM f),0) AS side_effects\nFROM m;   -- duplicate Twilio retry → zero rows → workflow stops here",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').first().json.id, $json.id, $('LEAD_READY').first().json.id, $('NORMALIZE_WHATSAPP').first().json.message_sid, 'whatsapp', $('NORMALIZE_WHATSAPP').first().json.phone_e164, $('NORMALIZE_WHATSAPP').first().json.business_phone, $('NORMALIZE_WHATSAPP').first().json.body, JSON.stringify({num_media: $('NORMALIZE_WHATSAPP').first().json.num_media, media_url: $('NORMALIZE_WHATSAPP').first().json.media_url}) ] }}"
+        }
+      },
+      "id": "a0770ed1-43a7-4e62-93e1-1c51ff355ec2",
+      "name": "SAVE_INBOUND_MESSAGE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3360,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "637b6ba0-4e15-4afb-9948-32ab61a6326e",
+              "leftValue": "={{ $json.id !== undefined && $json.id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "212ec470-f239-45e9-a951-579493ffe5ca",
+      "name": "SAVE_INBOUND_MESSAGE_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        3620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  CASE\n    WHEN rr_is_opt_out($1::text)                         THEN 'OPT_OUT'\n    WHEN rr_is_opt_in($1::text) AND l.status = 'STOPPED' THEN 'OPT_IN'\n    WHEN l.status = 'STOPPED'                            THEN 'STOPPED'\n    WHEN l.human_handoff OR NOT c.ai_active              THEN 'PAUSED'\n    ELSE 'AI'\n  END AS route,\n  l.id AS lead_id, l.name, l.phone, l.organization_id, c.id AS conversation_id,\n  o.settings->>'slack_channel' AS slack_channel\nFROM leads l\nJOIN conversations c ON c.id = $3::uuid\nJOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $2::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE_WHATSAPP').first().json.body, $json.lead_id, $json.conversation_id ] }}"
+        }
+      },
+      "id": "287583e5-7025-42e6-9357-18e415232a1e",
+      "name": "CLASSIFY_GATE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3880,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "828df40c-0357-40de-b81f-88017f2c6297",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "OPT_OUT",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "OPT_OUT"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "0ca8f689-5ee8-4ae5-a13e-266e135b6955",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "OPT_IN",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "OPT_IN"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "25091f34-9f79-4c9d-a193-507bc4a34c31",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "STOPPED",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "STOPPED"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "a304457f-fc57-428b-b569-98fab8c42fc4",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "PAUSED",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "PAUSED"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "4bb5b439-2d6c-44f3-887d-4864844a254f",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "AI",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "AI"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "e34ea769-69f7-4ccb-9e5e-f789f21d410d",
+      "name": "ROUTE",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        4140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {\n  lead_id: $json.lead_id, organization_id: $json.organization_id, channel: 'whatsapp',\n  body: $('NORMALIZE_WHATSAPP').first().json.body, action: $json.route, source: 'inbound_keyword'\n}}];"
+      },
+      "id": "a53f65e5-b4da-434b-ad3a-437eac74961c",
+      "name": "PREP_CONSENT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__21__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "35066e18-794e-4524-b64b-f938fda89100",
+      "name": "EXECUTE_21_CONSENT",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, $3::text, 'INBOUND_FROM_STOPPED_LEAD', '{}'::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id, $json.lead_id, '08_INBOUND_WHATSAPP' ] }}"
+        }
+      },
+      "id": "f99571e8-82d2-4431-832c-c5373c65ab35",
+      "name": "LOG_IGNORED_STOPPED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4400,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.slack_channel }}"
+        },
+        "text": "={{ '💬 New whatsapp reply (AI paused — human owns this lead)\\n' + ($json.name || 'Unknown') + ' · ' + $json.phone + '\\n> ' + $('NORMALIZE_WHATSAPP').first().json.body }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "6bc9c60f-cc3e-40ed-94f4-346a8d990267",
+      "name": "FORWARD_TO_HUMAN",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        4400,
+        660
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {\n  lead_id: $json.lead_id,\n  conversation_id: $json.conversation_id,\n  organization_id: $json.organization_id,\n  channel: 'whatsapp',\n  body: $('NORMALIZE_WHATSAPP').first().json.body,\n  message_sid: $('NORMALIZE_WHATSAPP').first().json.message_sid\n}}];"
+      },
+      "id": "f4fc580a-c1f3-44dc-853f-b5bfef6d2d5a",
+      "name": "PREP_ROUTER_INPUT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__04__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "7bed0e49-2a44-4cf2-b54b-4d27915860fe",
+      "name": "EXECUTE_04_AI_ROUTER",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4660,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 08 · Inbound WHATSAPP\nTwilio → `/webhook/roofradar/whatsapp` (HTTP Basic auth in the URL: `https://user:pass@your-n8n/webhook/roofradar/whatsapp`).\nReplies `<Response/>` instantly so Twilio never times out.\n**Idempotent:** a retried MessageSid hits the unique index and the run stops.\nOpt-out / opt-in keywords are handled deterministically **before** any AI sees the message.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "aaabd6a9-ec19-4b1e-9bea-d7835bff5ebb",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "SAVE_INBOUND_MESSAGE": {
+      "main": [
+        [
+          {
+            "node": "SAVE_INBOUND_MESSAGE_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TWILIO_WHATSAPP_INBOUND": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_TWIML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESPOND_TWIML": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE_WHATSAPP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE_WHATSAPP": {
+      "main": [
+        [
+          {
+            "node": "VALID_SENDER?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALID_SENDER?": {
+      "main": [
+        [
+          {
+            "node": "RESOLVE_ORG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESOLVE_ORG": {
+      "main": [
+        [
+          {
+            "node": "FIND_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LEAD_FOUND?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LEAD_FOUND?": {
+      "main": [
+        [
+          {
+            "node": "LEAD_READY",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CREATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LEAD_READY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LEAD_READY": {
+      "main": [
+        [
+          {
+            "node": "FIND_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "CONVERSATION_EXISTS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONVERSATION_EXISTS?": {
+      "main": [
+        [
+          {
+            "node": "SAVE_INBOUND_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CREATE_CONVERSATION_IF_NEEDED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_CONVERSATION_IF_NEEDED": {
+      "main": [
+        [
+          {
+            "node": "SAVE_INBOUND_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_INBOUND_MESSAGE_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "CLASSIFY_GATE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLASSIFY_GATE": {
+      "main": [
+        [
+          {
+            "node": "ROUTE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE": {
+      "main": [
+        [
+          {
+            "node": "PREP_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_IGNORED_STOPPED",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "FORWARD_TO_HUMAN",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_ROUTER_INPUT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_CONSENT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_21_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_ROUTER_INPUT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_04_AI_ROUTER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "08",
+    "description": "Twilio whatsapp webhook → lead + conversation → idempotent save → consent gate → 04 AI Router"
+  }
+}

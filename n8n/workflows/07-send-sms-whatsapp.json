@@ -1,0 +1,341 @@
+{
+  "name": "RR 07 · Send SMS / WhatsApp",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "5fdcaee3-26cc-4e15-864f-80224684be58",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH conv AS (\n  INSERT INTO conversations (organization_id, lead_id, channel, status, ai_active, last_message_at)\n  SELECT l.organization_id, l.id, $2::text, 'ACTIVE', true, NOW() FROM leads l WHERE l.id = $1::uuid\n  ON CONFLICT (lead_id, channel) WHERE status = 'ACTIVE'\n  DO UPDATE SET last_message_at = conversations.last_message_at\n  RETURNING id\n)\nSELECT l.id AS lead_id, l.phone AS phone_e164, l.name, l.status AS lead_status,\n       o.id AS organization_id, o.name AS org_name, o.business_phone, o.whatsapp_number,\n       (SELECT id FROM conv) AS conversation_id,\n       rr_can_contact(l.id, $2::text) AS can_contact\nFROM leads l JOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.channel === 'whatsapp' ? 'whatsapp' : 'sms' ] }}"
+        }
+      },
+      "id": "b8b923e4-1088-4810-b4af-aec076f6af36",
+      "name": "GET_CONTEXT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $json;\nif (!c.lead_id) throw new Error('VALIDATION: lead not found');\nif (!/^\\+[1-9]\\d{7,14}$/.test(c.phone_e164 || '')) throw new Error('VALIDATION: Invalid E.164 phone');\nreturn $input.all();"
+      },
+      "id": "a67c6d72-5c09-4952-b2fa-8ad0d267003a",
+      "name": "VALIDATE_PHONE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst c = $json;\nconst body = String(t.body || t.reply || '').trim();\nif (!body || body.length > 1000) throw new Error('VALIDATION: Invalid SMS body (empty or > 1000 chars)');\nconst channel = t.channel === 'whatsapp' ? 'whatsapp' : 'sms';\nconst from = channel === 'whatsapp' ? (c.whatsapp_number || c.business_phone) : c.business_phone;\nif (!from) throw new Error('VALIDATION: organization has no sending number');\nreturn [{ json: { ...c, body, channel, from, kind: t.kind || 'AI_REPLY', ai_generated: t.ai_generated !== false,\n                  metadata: t.metadata || {} } }];"
+      },
+      "id": "e32d0f4b-e6a7-4d0a-bd41-c33715d482dc",
+      "name": "VALIDATE_MESSAGE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "d284de3f-894e-40dc-a6a2-7e76d75ca281",
+              "leftValue": "={{ $json.can_contact === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7b41f533-19cb-4a02-baab-bc507324520e",
+      "name": "CONSENT_OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, '07_SEND_SMS', 'BLOCKED_NO_CONSENT', $3::jsonb) AS event_id,\n       false AS sent, 'no_consent_or_stopped' AS reason, $2::uuid AS lead_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id, $json.lead_id, JSON.stringify({kind: $json.kind}) ] }}"
+        }
+      },
+      "id": "05434edb-8b1e-49f1-b88d-ec8e16114c60",
+      "name": "LOG_BLOCKED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "from": "={{ $json.from }}",
+        "to": "={{ $json.phone_e164 }}",
+        "toWhatsapp": "={{ $json.channel === 'whatsapp' }}",
+        "message": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "7845cf3d-0e10-4a6e-a72a-0cce98b52e90",
+      "name": "TWILIO_SEND_SMS",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        480
+      ],
+      "credentials": {
+        "twilioApi": {
+          "id": "__CRED_TWILIO_ID__",
+          "name": "RoofRadar Twilio"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (organization_id, conversation_id, lead_id, external_message_id, direction, channel,\n                      sender, recipient, body, ai_generated, delivery_status, metadata)\nVALUES ($1::uuid, $2::uuid, $3::uuid, $4::text, 'OUTBOUND', $5::text, $6::text, $7::text, $8::text,\n        $9::boolean, $10::text, $11::jsonb)\nON CONFLICT (external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING\nRETURNING id, external_message_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_MESSAGE').first().json.organization_id, $('VALIDATE_MESSAGE').first().json.conversation_id, $('VALIDATE_MESSAGE').first().json.lead_id, $json.sid, $('VALIDATE_MESSAGE').first().json.channel, $('VALIDATE_MESSAGE').first().json.from, $('VALIDATE_MESSAGE').first().json.phone_e164, $('VALIDATE_MESSAGE').first().json.body, $('VALIDATE_MESSAGE').first().json.ai_generated, $json.status || 'queued', JSON.stringify({kind: $('VALIDATE_MESSAGE').first().json.kind, ...$('VALIDATE_MESSAGE').first().json.metadata}) ] }}"
+        }
+      },
+      "id": "e93c6f3f-909a-4876-9833-7d72de587a76",
+      "name": "SAVE_OUTBOUND_MESSAGE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH l AS (\n  UPDATE leads SET last_message_at = NOW(), last_outbound_at = NOW(),\n         status = CASE WHEN status = 'NEW' THEN 'CONTACTED' ELSE status END\n  WHERE id = $1::uuid RETURNING id\n), c AS (\n  UPDATE conversations SET last_message_at = NOW() WHERE id = $2::uuid RETURNING id\n)\nSELECT (SELECT id FROM l) AS lead_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_MESSAGE').first().json.lead_id, $('VALIDATE_MESSAGE').first().json.conversation_id ] }}"
+        }
+      },
+      "id": "b0533b9e-10b5-4bb1-8395-d83b476bed55",
+      "name": "UPDATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, lead_id, type, description, metadata)\nVALUES ($1::uuid, $2::uuid, 'SMS_SENT', $3::text, $4::jsonb)\nRETURNING true AS sent, $5::text AS message_sid, lead_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE_MESSAGE').first().json.organization_id, $('VALIDATE_MESSAGE').first().json.lead_id, $('VALIDATE_MESSAGE').first().json.kind, JSON.stringify({channel: $('VALIDATE_MESSAGE').first().json.channel, sid: $('TWILIO_SEND_SMS').first().json.sid}), $('TWILIO_SEND_SMS').first().json.sid ] }}"
+        }
+      },
+      "id": "571a4b48-b3f1-4bc0-b2b8-6bf98d168d80",
+      "name": "LOG_ACTIVITY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 07 · Send SMS / WhatsApp\nThe **only** node in the system that talks to Twilio Messaging. Input: `lead_id, channel, body, kind`.\nConsent is re-checked at send time (`rr_can_contact`), so a STOP that arrives mid-flow always wins.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "8f8cfaaa-98e1-4f0d-9b7f-380efa6e47f0",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_CONTEXT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_CONTEXT": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_PHONE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_PHONE": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_MESSAGE": {
+      "main": [
+        [
+          {
+            "node": "CONSENT_OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONSENT_OK?": {
+      "main": [
+        [
+          {
+            "node": "TWILIO_SEND_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_BLOCKED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TWILIO_SEND_SMS": {
+      "main": [
+        [
+          {
+            "node": "SAVE_OUTBOUND_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_OUTBOUND_MESSAGE": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "07",
+    "description": "Single exit point for every outbound text: E.164 + body validation, consent gate, Twilio, audit trail"
+  }
+}

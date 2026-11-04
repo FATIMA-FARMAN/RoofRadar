@@ -1,0 +1,570 @@
+{
+  "name": "RR 24B · Voice Post-Call",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "roofradar/voice-call-ended",
+        "options": {},
+        "authentication": "headerAuth"
+      },
+      "id": "1bfcf22f-2b45-4a4f-a5ab-6d0cd4b4916e",
+      "name": "CALL_ENDED_WEBHOOK",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__CRED_VOICE_KEY_ID__",
+          "name": "RoofRadar Voice Gateway Key"
+        }
+      },
+      "webhookId": "15bb64f5-08db-4130-bb3d-ed3a92f9950a"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH t AS (\n  SELECT string_agg(speaker || ': ' || text, E'\\n' ORDER BY created_at) AS transcript\n  FROM voice_turns WHERE session_id = (SELECT id FROM voice_sessions WHERE call_sid = $1::text)\n)\nUPDATE voice_sessions s SET\n  transcript = (SELECT transcript FROM t),\n  ended_at = COALESCE(s.ended_at, NOW()),\n  duration_seconds = COALESCE($2::int, EXTRACT(epoch FROM (COALESCE(s.ended_at, NOW()) - s.started_at))::int),\n  status = CASE WHEN s.status = 'IN_PROGRESS' THEN 'COMPLETED' ELSE s.status END\nWHERE s.call_sid = $1::text\nRETURNING s.*, (SELECT name FROM organizations WHERE id = s.organization_id) AS org_name,\n          (SELECT settings FROM organizations WHERE id = s.organization_id) AS org_settings;",
+        "options": {
+          "queryReplacement": "={{ [ $json.body.call_sid, $json.body.duration_seconds ?? null ] }}"
+        }
+      },
+      "id": "5289ca50-5a59-45dc-908c-f27740fb2035",
+      "name": "SAVE_TRANSCRIPT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "5eea544f-5434-4665-b870-56614c754999",
+              "leftValue": "={{ !!$json.transcript && !!$json.lead_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d6059b81-3cae-43fc-b69c-4180ead03c1d",
+      "name": "HAS_TRANSCRIPT?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function fill(t, vars) { return t.replace(/\\{(\\w+)\\}/g, (m, k) => (vars[k] ?? m)); }\nfunction buildOpenAI(model, system, userObj, maxTokens) {\n  const req = {\n    model,\n    messages: [\n      { role: 'system', content: system },\n      { role: 'user', content: typeof userObj === 'string' ? userObj : JSON.stringify(userObj) }\n    ],\n    response_format: { type: 'json_object' },\n    max_completion_tokens: maxTokens || 1500\n  };\n  // GPT-5 family / o-series are reasoning models: keep reasoning light for chat latency\n  if (/^(gpt-5|o\\d)/.test(model)) req.reasoning_effort = 'low';\n  return req;\n}\nconst P = \"Summarise this phone call between a caller and the {company} voice assistant.\\nReturn JSON only:\\n{\\\"summary\\\": \\\"1-2 sentences\\\", \\\"problem_type\\\": string|null, \\\"urgency\\\": \\\"LOW\\\"|\\\"MEDIUM\\\"|\\\"HIGH\\\"|\\\"EMERGENCY\\\"|\\\"UNKNOWN\\\",\\n  \\\"appointment_booked\\\": boolean, \\\"human_handoff\\\": boolean, \\\"followup_required\\\": boolean,\\n  \\\"followup_reason\\\": string|null, \\\"caller_name\\\": string|null, \\\"address\\\": string|null,\\n  \\\"outcome\\\": \\\"BOOKED\\\"|\\\"QUALIFIED\\\"|\\\"HANDOFF\\\"|\\\"INFO\\\"|\\\"ABANDONED\\\"|\\\"OPTED_OUT\\\"}\\nOnly report appointment_booked=true if a TOOL line in the transcript shows booked=true.\";\n\nconst s = $json;\nreturn [{ json: { openai_request: buildOpenAI(s.org_settings?.ai?.models?.summary || 'gpt-5.4-mini',\n  fill(P, { company: s.org_name }), { transcript: String(s.transcript).slice(-24000) }, 1500) } }];"
+      },
+      "id": "96bcb2e6-76a5-4c58-9813-ed7de58c43ce",
+      "name": "PREP_SUMMARY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_request) }}"
+      },
+      "id": "b6030a39-732f-46cd-a4fa-385f0a00927c",
+      "name": "AI_SUMMARY",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "__CRED_OPENAI_ID__",
+          "name": "RoofRadar OpenAI"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst content = r.choices?.[0]?.message?.content || '';\nlet parsed = null, parse_error = null;\ntry { parsed = JSON.parse(content); }\ncatch (e) {\n  const m = content.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parse_error = e2.message; } }\n  else parse_error = e.message || 'empty response';\n}\nreturn [{ json: {\n  parsed, parse_error, raw: content,\n  model: r.model || null,\n  prompt_tokens: r.usage?.prompt_tokens ?? null,\n  completion_tokens: r.usage?.completion_tokens ?? null\n}}];"
+      },
+      "id": "d6439b0b-bd2f-4bba-8d57-062cb225c62f",
+      "name": "PARSE_JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const o = $json.parsed || {};\nconst s = $('SAVE_TRANSCRIPT').first().json;\nconst pick = (v, l, d) => l.includes(v) ? v : d;\n// never trust the model on booking: check the transcript for a tool result\nconst toolBooked = /TOOL: .*\"booked\":\\s*true/.test(s.transcript || '');\nconst toolHandoff = /TOOL: .*\"handoff\":\\s*true|TOOL: .*\"transfer\":\\s*true/.test(s.transcript || '');\nconst outcome = toolBooked ? 'BOOKED' : toolHandoff ? 'HANDOFF'\n  : pick(String(o.outcome || '').toUpperCase(), ['QUALIFIED','INFO','ABANDONED','OPTED_OUT'], 'INFO');\nreturn [{ json: {\n  summary: typeof o.summary === 'string' ? o.summary.slice(0, 600) : null,\n  problem_type: typeof o.problem_type === 'string' ? o.problem_type.slice(0, 120) : null,\n  urgency: pick(String(o.urgency || '').toUpperCase(), ['LOW','MEDIUM','HIGH','EMERGENCY'], null),\n  caller_name: typeof o.caller_name === 'string' ? o.caller_name.slice(0, 120) : null,\n  address: typeof o.address === 'string' ? o.address.slice(0, 200) : null,\n  appointment_booked: toolBooked, human_handoff: toolHandoff,\n  followup_required: !toolBooked && !toolHandoff && outcome !== 'OPTED_OUT' && o.followup_required !== false,\n  followup_reason: o.followup_reason || null, outcome\n}}];"
+      },
+      "id": "66eb95a7-9ea7-4c19-abe3-68d38210123e",
+      "name": "VALIDATE_SUMMARY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE voice_sessions SET summary = $2::text, outcome = $3::text WHERE id = $1::uuid RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('SAVE_TRANSCRIPT').first().json.id, $('VALIDATE_SUMMARY').first().json.summary, $('VALIDATE_SUMMARY').first().json.outcome ] }}"
+        }
+      },
+      "id": "4a591ce5-97a7-4a93-942a-3a83bc73a00e",
+      "name": "UPDATE_SESSION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET\n  name = COALESCE(name, NULLIF($2::text,'')), address = COALESCE(address, NULLIF($3::text,'')),\n  problem_type = COALESCE(problem_type, NULLIF($4::text,'')), urgency = COALESCE(NULLIF($5::text,''), urgency),\n  status = CASE WHEN status IN ('NEW','CONTACTED') THEN 'ENGAGED' ELSE status END,\n  last_inbound_at = NOW(), last_message_at = NOW(),\n  metadata = metadata || jsonb_build_object('last_call_summary', $6::text)\nWHERE id = $1::uuid\nRETURNING id, organization_id, status, human_handoff;",
+        "options": {
+          "queryReplacement": "={{ [ $('SAVE_TRANSCRIPT').first().json.lead_id, $('VALIDATE_SUMMARY').first().json.caller_name || '', $('VALIDATE_SUMMARY').first().json.address || '', $('VALIDATE_SUMMARY').first().json.problem_type || '', $('VALIDATE_SUMMARY').first().json.urgency || '', $('VALIDATE_SUMMARY').first().json.summary || '' ] }}"
+        }
+      },
+      "id": "db0f50f4-540e-4000-adc7-89d38f9cde51",
+      "name": "UPDATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE appointments SET notes = coalesce(notes, '') || E'\\nCall summary: ' || $2::text\nWHERE id = (SELECT id FROM appointments WHERE lead_id = $1::uuid AND status IN ('SCHEDULED','CONFIRMED')\n            AND created_at > NOW() - INTERVAL '2 hours' ORDER BY created_at DESC LIMIT 1)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('SAVE_TRANSCRIPT').first().json.lead_id, $('VALIDATE_SUMMARY').first().json.summary || '' ] }}"
+        }
+      },
+      "id": "98f478c2-eeca-459d-80bf-13092544c651",
+      "name": "UPDATE_APPOINTMENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $('SAVE_TRANSCRIPT').first().json.lead_id } }];"
+      },
+      "id": "a16f800c-f0fa-424e-ad77-d11571209931",
+      "name": "PREP_CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__12__"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "136871c3-29b0-41bd-b5b4-d5196ba0b5f4",
+      "name": "UPDATE_CRM",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "dc867232-77c1-4a3f-9e75-e0fd29fdeebc",
+              "leftValue": "={{ $('VALIDATE_SUMMARY').first().json.followup_required }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "94e10c97-9659-4710-8aa3-a1e1bd6c66f3",
+      "name": "SEND_SMS_IF_NEEDED",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { lead_id: $('SAVE_TRANSCRIPT').first().json.lead_id, organization_id: $('SAVE_TRANSCRIPT').first().json.organization_id,\n  channel: 'sms', mode: 'POST_CALL', router_reason: $('VALIDATE_SUMMARY').first().json.followup_reason || 'we will follow up about your roof' } }];"
+      },
+      "id": "ab152d3a-8cd5-4e23-9961-ce77759c0297",
+      "name": "PREP_POST_CALL_SMS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "dcbf1100-5c62-4c5c-a864-a411ffbf523d",
+      "name": "EXECUTE_06_AI_CONVERSATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        3880,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_schedule_nurture($1::uuid, NOW(), 2) AS scheduled;",
+        "options": {
+          "queryReplacement": "={{ [ $('SAVE_TRANSCRIPT').first().json.lead_id ] }}"
+        }
+      },
+      "id": "b4984f00-9a0a-41f6-9ed5-6fc986d908e9",
+      "name": "SCHEDULE_NURTURE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4140,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, lead_id, type, description, metadata)\nVALUES ($1::uuid, $2::uuid, 'VOICE_CALL', $3::text, $4::jsonb) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('SAVE_TRANSCRIPT').first().json.organization_id, $('SAVE_TRANSCRIPT').first().json.lead_id, 'Voice call — ' + $('VALIDATE_SUMMARY').first().json.outcome, JSON.stringify({call_sid: $('SAVE_TRANSCRIPT').first().json.call_sid, duration: $('SAVE_TRANSCRIPT').first().json.duration_seconds, summary: $('VALIDATE_SUMMARY').first().json.summary}) ] }}"
+        }
+      },
+      "id": "c00c7675-bba1-42fd-994b-3195d3609f51",
+      "name": "LOG_ACTIVITY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4400,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "CALL_ENDED_WEBHOOK": {
+      "main": [
+        [
+          {
+            "node": "SAVE_TRANSCRIPT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_TRANSCRIPT": {
+      "main": [
+        [
+          {
+            "node": "HAS_TRANSCRIPT?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HAS_TRANSCRIPT?": {
+      "main": [
+        [
+          {
+            "node": "PREP_SUMMARY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_SUMMARY": {
+      "main": [
+        [
+          {
+            "node": "AI_SUMMARY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI_SUMMARY": {
+      "main": [
+        [
+          {
+            "node": "PARSE_JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_JSON": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_SUMMARY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_SUMMARY": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_SESSION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_SESSION": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_APPOINTMENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_APPOINTMENT": {
+      "main": [
+        [
+          {
+            "node": "PREP_CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_CRM": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_CRM": {
+      "main": [
+        [
+          {
+            "node": "SEND_SMS_IF_NEEDED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_SMS_IF_NEEDED": {
+      "main": [
+        [
+          {
+            "node": "PREP_POST_CALL_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_POST_CALL_SMS": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_06_AI_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "SCHEDULE_NURTURE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SCHEDULE_NURTURE": {
+      "main": [
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "24B",
+    "description": "Call ended → transcript → AI summary → update lead/session → CRM → text follow-up if needed"
+  }
+}

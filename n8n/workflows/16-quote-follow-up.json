@@ -1,0 +1,373 @@
+{
+  "name": "RR 16 · Quote Follow-up",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * *"
+            }
+          ]
+        }
+      },
+      "id": "023a1726-57c0-491f-b67f-5e3754dc9d13",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT d.id AS deal_id, d.lead_id, d.quote_followups, d.quote_sent_at, d.last_contact_at,\n       l.name, l.problem_type, l.status, l.organization_id, o.name AS org_name, o.settings,\n       rr_can_contact(l.id, 'sms') AS can_contact, l.last_inbound_at\nFROM deals d\nJOIN leads l ON l.id = d.lead_id\nJOIN organizations o ON o.id = d.organization_id\nWHERE d.stage = 'QUOTE_SENT'\n  AND coalesce(d.quote_status, 'OPEN') IN ('OPEN','FOLLOWED_UP')\n  AND d.quote_sent_at IS NOT NULL\n  AND d.quote_followups < jsonb_array_length(coalesce(o.settings->'quote_followup_days', '[2,5,10]'::jsonb))\n  AND d.quote_sent_at + make_interval(days => (coalesce(o.settings->'quote_followup_days', '[2,5,10]'::jsonb)->>d.quote_followups)::int) <= NOW()\nLIMIT 25;",
+        "options": {}
+      },
+      "id": "9f5b04a1-971a-4d46-89f2-3c6cd3c3e1b8",
+      "name": "FIND_OPEN_QUOTES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst dayMs = 24 * 3600e3;\nconst recent = [r.last_contact_at, r.last_inbound_at].filter(Boolean).some(t => Date.now() - new Date(t).getTime() < dayMs);\nreturn { json: { ...r, send: !recent && r.status !== 'STOPPED' } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "cd0629e8-fffb-466f-b843-84a3d76d0e77",
+      "name": "CHECK_LAST_CONTACT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "147e7254-3ae3-4bc2-9d77-09832cd7e07b",
+              "leftValue": "={{ $json.send && $json.can_contact }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c4c1b016-f477-4531-a2a4-4535e51babe6",
+      "name": "CHECK_CONSENT",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function fill(t, vars) { return t.replace(/\\{(\\w+)\\}/g, (m, k) => (vars[k] ?? m)); }\nfunction buildOpenAI(model, system, userObj, maxTokens) {\n  const req = {\n    model,\n    messages: [\n      { role: 'system', content: system },\n      { role: 'user', content: typeof userObj === 'string' ? userObj : JSON.stringify(userObj) }\n    ],\n    response_format: { type: 'json_object' },\n    max_completion_tokens: maxTokens || 1500\n  };\n  // GPT-5 family / o-series are reasoning models: keep reasoning light for chat latency\n  if (/^(gpt-5|o\\d)/.test(model)) req.reasoning_effort = 'low';\n  return req;\n}\nconst P = \"Write a concise, professional follow-up SMS for a roofing customer of {company} who received a quote.\\nDo not: invent pricing, mention or change the quoted price, pressure the customer, or claim a deadline.\\nAsk whether they have questions or want to proceed. Max 240 characters. No emojis.\\nReturn JSON only: {\\\"reply\\\": \\\"message text\\\"}\";\n\nconst r = $json;\nconst user = { customer_first_name: (r.name || '').split(' ')[0] || null, roofing_issue: r.problem_type,\n               followup_number: r.quote_followups + 1, company: r.org_name };\nreturn { json: { openai_request: buildOpenAI(r.settings?.ai?.models?.followup || 'gpt-5.4-mini', fill(P, { company: r.org_name }), user, 800) } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "b3ff1c7f-71b4-4e10-9481-c9279a3754fc",
+      "name": "PREP_AI_MESSAGE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_request) }}"
+      },
+      "id": "b841b9bf-3f57-4c8f-912a-781697c2e437",
+      "name": "AI_GENERATE_MESSAGE",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "__CRED_OPENAI_ID__",
+          "name": "RoofRadar OpenAI"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst content = r.choices?.[0]?.message?.content || '';\nlet parsed = null, parse_error = null;\ntry { parsed = JSON.parse(content); } catch (e) {\n  const m = content.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parse_error = e2.message; } } else parse_error = e.message;\n}\nreturn { json: { parsed, parse_error, raw: content } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "117def39-4145-459a-b89b-c09499b8ec29",
+      "name": "PARSE_JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const q = $('CHECK_LAST_CONTACT').item.json;\nlet reply = typeof $json.parsed?.reply === 'string' ? $json.parsed.reply.trim() : '';\nconst bad = !reply || reply.length > 320 || /\\$\\s?\\d|\\d+\\s?(dollars|usd)|\\b(expires?|deadline|only today|last chance)\\b/i.test(reply);\nconst first = (q.name || '').split(' ')[0];\nif (bad) reply = `Hi${first ? ' ' + first : ''}, it's ${q.org_name} — just checking whether you had any questions about your roofing quote, or if you'd like to go ahead. Happy to help either way.`;\nreturn { json: { lead_id: q.lead_id, deal_id: q.deal_id, channel: 'sms', body: reply, kind: 'QUOTE_FOLLOWUP', ai_generated: !bad } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "4ad426eb-f80a-4d06-b85f-7b4c54b08bc8",
+      "name": "VALIDATE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__07__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "68d8addf-ff36-4d8d-bf34-e77bffedc6b1",
+      "name": "SEND_SMS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        2320,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE deals SET quote_followups = quote_followups + 1, quote_status = 'FOLLOWED_UP', last_contact_at = NOW()\nWHERE id = $1::uuid RETURNING id, lead_id, organization_id, quote_followups;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE').item.json.deal_id ] }}"
+        }
+      },
+      "id": "37e6473d-1c3d-461d-b9ef-aa7b1bbe63f7",
+      "name": "UPDATE_QUOTE_STATUS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, lead_id, type, description, metadata)\nVALUES ($1::uuid, $2::uuid, 'QUOTE_FOLLOWUP', 'Quote follow-up #' || $3::text, '{}'::jsonb) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id, $json.lead_id, $json.quote_followups ] }}"
+        }
+      },
+      "id": "e3ca4125-a015-4f39-8c93-6937c89c08ba",
+      "name": "LOG_ACTIVITY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 16 · Quote Follow-up\nA human moves a deal to `stage='QUOTE_SENT', quote_sent_at=NOW()` (or your CRM sync does).\nNudges go out on the days in `settings.quote_followup_days` (default 2, 5, 10). The AI never sees or states the price.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "e8186d66-0ba1-4d33-aa1e-7cf42a7fb92f",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "FIND_OPEN_QUOTES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_OPEN_QUOTES": {
+      "main": [
+        [
+          {
+            "node": "CHECK_LAST_CONTACT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_LAST_CONTACT": {
+      "main": [
+        [
+          {
+            "node": "CHECK_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_CONSENT": {
+      "main": [
+        [
+          {
+            "node": "PREP_AI_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_AI_MESSAGE": {
+      "main": [
+        [
+          {
+            "node": "AI_GENERATE_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI_GENERATE_MESSAGE": {
+      "main": [
+        [
+          {
+            "node": "PARSE_JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_JSON": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE": {
+      "main": [
+        [
+          {
+            "node": "SEND_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_SMS": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_QUOTE_STATUS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_QUOTE_STATUS": {
+      "main": [
+        [
+          {
+            "node": "LOG_ACTIVITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "16",
+    "description": "Daily: open quotes past their follow-up day → AI nudge (no prices, no pressure) → 07"
+  }
+}

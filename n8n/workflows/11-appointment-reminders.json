@@ -1,0 +1,394 @@
+{
+  "name": "RR 11 · Appointment Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "3aac6fcb-dd5b-4915-a66f-3c39026cdd04",
+      "name": "SCHEDULE_TRIGGER",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT a.id AS appointment_id, a.start_at, a.lead_id, l.phone, l.name, l.address,\n       o.name AS org_name, o.timezone, o.settings->'reminders' AS reminder_cfg,\n       CASE\n         WHEN a.reminder_24h_sent_at IS NULL AND a.start_at BETWEEN NOW() + INTERVAL '20 hours' AND NOW() + INTERVAL '25 hours' THEN '24_HOUR'\n         WHEN a.reminder_2h_sent_at  IS NULL AND a.start_at BETWEEN NOW() + INTERVAL '1 hour'   AND NOW() + INTERVAL '2 hours 15 minutes' THEN '2_HOUR'\n         ELSE 'NONE'\n       END AS reminder_type,\n       rr_can_contact(l.id, 'sms') AS can_contact\nFROM appointments a\nJOIN leads l ON l.id = a.lead_id\nJOIN organizations o ON o.id = a.organization_id\nWHERE a.status IN ('SCHEDULED','CONFIRMED')\n  AND a.start_at BETWEEN NOW() + INTERVAL '1 hour' AND NOW() + INTERVAL '25 hours';",
+        "options": {}
+      },
+      "id": "d239b050-72b8-4aa5-b585-a9d32b03bdba",
+      "name": "FIND_UPCOMING_APPOINTMENTS",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst when = DateTime.fromJSDate(new Date(r.start_at)).setZone(r.timezone || 'America/New_York');\nconst first = (r.name || '').split(' ')[0];\nconst hi = first ? `Hi ${first}, ` : 'Hi, ';\nconst body = r.reminder_type === '24_HOUR'\n  ? `${hi}reminder: your ${r.org_name} roof inspection is tomorrow, ${when.toFormat(\"cccc 'at' h:mm a\")}. Reply here if you need to reschedule.`\n  : `${hi}your ${r.org_name} inspector arrives around ${when.toFormat('h:mm a')} today. Reply here if anything has changed.`;\nconst enabled = r.reminder_type === '24_HOUR' ? (r.reminder_cfg?.h24 !== false) : (r.reminder_cfg?.h2 !== false);\nreturn { json: { ...r, body, reminder_type: enabled ? r.reminder_type : 'NONE' } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c5f8bbb3-3c5b-468a-9c1e-5a277768d565",
+      "name": "CALCULATE_REMINDER_TYPE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "5859f05e-d547-4161-80f4-bfdf34b3fb05",
+                    "leftValue": "={{ $json.reminder_type }}",
+                    "rightValue": "24_HOUR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "24_HOUR"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "5f8a5cda-c037-4ca5-9898-cb18211a84e9",
+                    "leftValue": "={{ $json.reminder_type }}",
+                    "rightValue": "2_HOUR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "2_HOUR"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "70d04b24-d23b-49c9-89e1-0a9d5798b0c6",
+      "name": "SWITCH",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "7d2d972c-0a69-41bf-9ba9-f8fbc584ef2b",
+              "leftValue": "={{ $json.can_contact === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "87a1b265-b903-403d-84d4-eff3b0db3c58",
+      "name": "CHECK_CONSENT",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE appointments SET\n  reminder_24h_sent_at = CASE WHEN $2::text = '24_HOUR' THEN NOW() ELSE reminder_24h_sent_at END,\n  reminder_2h_sent_at  = CASE WHEN $2::text = '2_HOUR'  THEN NOW() ELSE reminder_2h_sent_at  END\nWHERE id = $1::uuid\n  AND ( ($2::text = '24_HOUR' AND reminder_24h_sent_at IS NULL)\n     OR ($2::text = '2_HOUR'  AND reminder_2h_sent_at  IS NULL) )\nRETURNING id AS appointment_id, lead_id, $2::text AS reminder_type, $3::text AS body;",
+        "options": {
+          "queryReplacement": "={{ [ $json.appointment_id, $json.reminder_type, $json.body ] }}"
+        }
+      },
+      "id": "5b87d9ea-e604-4579-9105-49b81d1832a8",
+      "name": "CLAIM_REMINDER",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "a4750b98-67de-44e5-babc-a30d3d6e0bb5",
+              "leftValue": "={{ $json.appointment_id !== undefined && $json.appointment_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6d9d383c-ba2b-4b83-96ea-dcc29857ea37",
+      "name": "CLAIM_REMINDER_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: { lead_id: $json.lead_id, channel: 'sms', body: $json.body, kind: 'REMINDER_' + $json.reminder_type, ai_generated: false } };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "a97eefe2-812a-4063-9ad8-ee8af1dd3e12",
+      "name": "PREP_SMS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__07__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "61c2bea6-ca97-40e5-a5cb-fb0f40d1f5ec",
+      "name": "SEND_SMS",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        2320,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO activities (organization_id, lead_id, type, description, metadata)\nSELECT organization_id, id, 'REMINDER_SENT', 'Appointment reminder', $2::jsonb FROM leads WHERE id = $1::uuid\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.lead_id, JSON.stringify({sent: $json.sent, sid: $json.message_sid || null}) ] }}"
+        }
+      },
+      "id": "84e5a50c-0821-4bfe-ba4a-425c015ce010",
+      "name": "LOG_REMINDER",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "CLAIM_REMINDER": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_REMINDER_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SCHEDULE_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "FIND_UPCOMING_APPOINTMENTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_UPCOMING_APPOINTMENTS": {
+      "main": [
+        [
+          {
+            "node": "CALCULATE_REMINDER_TYPE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CALCULATE_REMINDER_TYPE": {
+      "main": [
+        [
+          {
+            "node": "SWITCH",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SWITCH": {
+      "main": [
+        [
+          {
+            "node": "CHECK_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CHECK_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CHECK_CONSENT": {
+      "main": [
+        [
+          {
+            "node": "CLAIM_REMINDER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLAIM_REMINDER_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "PREP_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_SMS": {
+      "main": [
+        [
+          {
+            "node": "SEND_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_SMS": {
+      "main": [
+        [
+          {
+            "node": "LOG_REMINDER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "11",
+    "description": "Every 15 min: 24-hour and 2-hour SMS reminders (claim-then-send, never twice)"
+  }
+}

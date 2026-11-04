@@ -1,0 +1,898 @@
+{
+  "name": "RR 03 · Inbound SMS",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "roofradar/sms",
+        "options": {},
+        "responseMode": "responseNode",
+        "authentication": "basicAuth"
+      },
+      "id": "556961f4-5d13-4760-8df2-97e8f1527f16",
+      "name": "TWILIO_SMS_INBOUND",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "__CRED_TWILIO_HOOK_ID__",
+          "name": "RoofRadar Twilio Webhook Auth"
+        }
+      },
+      "webhookId": "3eba936e-e86c-4ec4-b135-454536b318b4"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<Response></Response>",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "62e2cf36-ad59-4a1a-9e5d-af376e2aef82",
+      "name": "RESPOND_TWIML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// E.164 normaliser. Assumes US/Canada (+1) when a bare 10/11-digit number arrives.\nfunction normalizePhone(phone) {\n  if (!phone) return null;\n  let p = String(phone).trim().replace(/^whatsapp:/i, '').replace(/[^\\d+]/g, '');\n  if (p.startsWith('00')) p = '+' + p.substring(2);\n  if (!p.startsWith('+') && p.length === 10) p = '+1' + p;\n  if (!p.startsWith('+') && p.length === 11 && p.startsWith('1')) p = '+' + p;\n  return /^\\+[1-9]\\d{7,14}$/.test(p) ? p : null;\n}\n\nconst b = $json.body ?? $json;\nconst media = Number(b.NumMedia || 0);\nreturn [{ json: {\n  message_sid: b.MessageSid || b.SmsSid || null,\n  phone_e164: normalizePhone(b.From),\n  business_phone: normalizePhone(b.To),\n  body: (b.Body || '').trim() || (media ? '[media message]' : ''),\n  num_media: media,\n  media_url: b.MediaUrl0 || null,\n  profile_name: b.ProfileName || null,\n  channel: 'sms',\n  received_at: new Date().toISOString()\n}}];"
+      },
+      "id": "17fbf566-fd67-4ad4-aa07-cd86ac611247",
+      "name": "NORMALIZE_SMS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "44157b2e-58fe-457a-a806-5cfb58fe64ca",
+              "leftValue": "={{ !!$json.phone_e164 && !!$json.message_sid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "03744bdb-34aa-495c-920b-dbb2710a4c5e",
+      "name": "VALID_SENDER?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, settings, business_phone, whatsapp_number FROM organizations\nWHERE active AND (business_phone = $1::text OR whatsapp_number = $1::text)\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.business_phone ] }}"
+        }
+      },
+      "id": "1417359b-772f-4cf2-a41b-fa33ce9e0b66",
+      "name": "RESOLVE_ORG",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM leads WHERE organization_id = $1::uuid AND phone = $2::text LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, $('NORMALIZE_SMS').first().json.phone_e164 ] }}"
+        }
+      },
+      "id": "7658d495-8711-416a-8155-26233b121086",
+      "name": "FIND_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "7f5513c4-5486-41e5-9a01-64297a882ef7",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3c0ab42b-e1b0-44cc-bab5-75d622b666f2",
+      "name": "LEAD_FOUND?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (organization_id, phone, name, source, status, preferred_channel, first_message)\nVALUES ($1::uuid, $2::text, NULLIF($3::text,''), $4::text, 'NEW', $4::text, $5::text)\nON CONFLICT (organization_id, phone) WHERE phone IS NOT NULL\nDO UPDATE SET updated_at = NOW()\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').first().json.id, $('NORMALIZE_SMS').first().json.phone_e164, $('NORMALIZE_SMS').first().json.profile_name || '', 'sms', $('NORMALIZE_SMS').first().json.body ] }}"
+        }
+      },
+      "id": "2e8130bf-d480-41c9-b3ce-6ec614124226",
+      "name": "CREATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();  // single merge point: found or created lead row"
+      },
+      "id": "dbadf070-b4f5-447c-9caa-65baa4edaf3e",
+      "name": "LEAD_READY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM conversations\nWHERE lead_id = $1::uuid AND channel = $2::text AND status = 'ACTIVE'\nORDER BY last_message_at DESC LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.id, 'sms' ] }}"
+        }
+      },
+      "id": "780ffe68-2db7-4795-a058-1c5d8852622d",
+      "name": "FIND_CONVERSATION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "d4d3fc6f-51e8-4423-bfaa-8dfca2c406f1",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "76e69376-d0eb-40b9-b906-5b843c32c338",
+      "name": "CONVERSATION_EXISTS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO conversations (organization_id, lead_id, channel, status, ai_active, last_message_at)\nVALUES ($1::uuid, $2::uuid, $3::text, 'ACTIVE', true, NOW())\nON CONFLICT (lead_id, channel) WHERE status = 'ACTIVE'\nDO UPDATE SET last_message_at = NOW()\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').first().json.id, $('LEAD_READY').first().json.id, 'sms' ] }}"
+        }
+      },
+      "id": "ef517856-92bf-4ea9-abfc-055ce7f122b5",
+      "name": "CREATE_CONVERSATION_IF_NEEDED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3100,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH m AS (\n  INSERT INTO messages (organization_id, conversation_id, lead_id, external_message_id, direction,\n                        channel, sender, recipient, body, ai_generated, delivery_status, metadata)\n  VALUES ($1::uuid, $2::uuid, $3::uuid, $4::text, 'INBOUND', $5::text, $6::text, $7::text, $8::text,\n          false, 'RECEIVED', $9::jsonb)\n  ON CONFLICT (external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING\n  RETURNING *\n), l AS (\n  UPDATE leads SET last_message_at = NOW(), last_inbound_at = NOW(),\n         status = CASE WHEN status IN ('NEW','CONTACTED') THEN 'ENGAGED' ELSE status END\n  WHERE id = $3::uuid AND EXISTS (SELECT 1 FROM m) RETURNING id\n), c AS (\n  UPDATE conversations SET last_message_at = NOW()\n  WHERE id = $2::uuid AND EXISTS (SELECT 1 FROM m) RETURNING id\n), f AS (   -- customer is talking: restart the nurture clock from step 2\n  SELECT rr_schedule_nurture($3::uuid, NOW(), 2) AS n WHERE EXISTS (SELECT 1 FROM m)\n)\nSELECT m.*, (SELECT count(*) FROM l) + (SELECT count(*) FROM c) + coalesce((SELECT n FROM f),0) AS side_effects\nFROM m;   -- duplicate Twilio retry → zero rows → workflow stops here",
+        "options": {
+          "queryReplacement": "={{ [ $('RESOLVE_ORG').first().json.id, $json.id, $('LEAD_READY').first().json.id, $('NORMALIZE_SMS').first().json.message_sid, 'sms', $('NORMALIZE_SMS').first().json.phone_e164, $('NORMALIZE_SMS').first().json.business_phone, $('NORMALIZE_SMS').first().json.body, JSON.stringify({num_media: $('NORMALIZE_SMS').first().json.num_media, media_url: $('NORMALIZE_SMS').first().json.media_url}) ] }}"
+        }
+      },
+      "id": "1bfcff90-0cad-4de1-b1e7-7a9242d23ed0",
+      "name": "SAVE_INBOUND_MESSAGE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3360,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "9881fbbd-3879-47c8-88d3-8714e80c493f",
+              "leftValue": "={{ $json.id !== undefined && $json.id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1ef373dd-98c0-454d-afef-d12029130806",
+      "name": "SAVE_INBOUND_MESSAGE_HAS_ROWS",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        3620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  CASE\n    WHEN rr_is_opt_out($1::text)                         THEN 'OPT_OUT'\n    WHEN rr_is_opt_in($1::text) AND l.status = 'STOPPED' THEN 'OPT_IN'\n    WHEN l.status = 'STOPPED'                            THEN 'STOPPED'\n    WHEN l.human_handoff OR NOT c.ai_active              THEN 'PAUSED'\n    ELSE 'AI'\n  END AS route,\n  l.id AS lead_id, l.name, l.phone, l.organization_id, c.id AS conversation_id,\n  o.settings->>'slack_channel' AS slack_channel\nFROM leads l\nJOIN conversations c ON c.id = $3::uuid\nJOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $2::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('NORMALIZE_SMS').first().json.body, $json.lead_id, $json.conversation_id ] }}"
+        }
+      },
+      "id": "60421327-fd4a-4bc8-aa59-e3b960cd88bf",
+      "name": "CLASSIFY_GATE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3880,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "f3976440-5307-4564-bcfe-22bf8889676b",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "OPT_OUT",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "OPT_OUT"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "dee0cb35-343c-40cd-bd02-2f1b0f83a780",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "OPT_IN",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "OPT_IN"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "a92e5797-bdd1-403f-a6ce-08d9e0aa23bb",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "STOPPED",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "STOPPED"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "fd034b5d-69e4-4c19-9faf-044e8c4dba38",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "PAUSED",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "PAUSED"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "1af4e367-2ed5-4f7b-b37f-3a40e86f0fed",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "AI",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "AI"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "216734f8-9e28-463d-bf00-7ded0de12315",
+      "name": "ROUTE",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        4140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {\n  lead_id: $json.lead_id, organization_id: $json.organization_id, channel: 'sms',\n  body: $('NORMALIZE_SMS').first().json.body, action: $json.route, source: 'inbound_keyword'\n}}];"
+      },
+      "id": "6caf9d76-4d31-42d4-b679-1dd6c2d76cf5",
+      "name": "PREP_CONSENT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__21__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "51e9a113-8622-4b47-a896-c4aeeabcfe85",
+      "name": "EXECUTE_21_CONSENT",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, $3::text, 'INBOUND_FROM_STOPPED_LEAD', '{}'::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.organization_id, $json.lead_id, '03_INBOUND_SMS' ] }}"
+        }
+      },
+      "id": "0333478d-bca2-4c65-9d85-e3be399d708f",
+      "name": "LOG_IGNORED_STOPPED",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4400,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.slack_channel }}"
+        },
+        "text": "={{ '💬 New sms reply (AI paused — human owns this lead)\\n' + ($json.name || 'Unknown') + ' · ' + $json.phone + '\\n> ' + $('NORMALIZE_SMS').first().json.body }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "a0e3ccf5-cc93-4a17-82f8-85621363bbb1",
+      "name": "FORWARD_TO_HUMAN",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        4400,
+        660
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {\n  lead_id: $json.lead_id,\n  conversation_id: $json.conversation_id,\n  organization_id: $json.organization_id,\n  channel: 'sms',\n  body: $('NORMALIZE_SMS').first().json.body,\n  message_sid: $('NORMALIZE_SMS').first().json.message_sid\n}}];"
+      },
+      "id": "42851664-f677-493e-b3ca-399a748cca80",
+      "name": "PREP_ROUTER_INPUT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__04__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "da537d59-9ebe-417d-b788-1c8d0f1001d1",
+      "name": "EXECUTE_04_AI_ROUTER",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4660,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 03 · Inbound SMS\nTwilio → `/webhook/roofradar/sms` (HTTP Basic auth in the URL: `https://user:pass@your-n8n/webhook/roofradar/sms`).\nReplies `<Response/>` instantly so Twilio never times out.\n**Idempotent:** a retried MessageSid hits the unique index and the run stops.\nOpt-out / opt-in keywords are handled deterministically **before** any AI sees the message.",
+        "width": 520,
+        "height": 260
+      },
+      "id": "418fdd49-dbf5-4375-9b73-fd3be18b83a6",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "SAVE_INBOUND_MESSAGE": {
+      "main": [
+        [
+          {
+            "node": "SAVE_INBOUND_MESSAGE_HAS_ROWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TWILIO_SMS_INBOUND": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_TWIML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESPOND_TWIML": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE_SMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE_SMS": {
+      "main": [
+        [
+          {
+            "node": "VALID_SENDER?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALID_SENDER?": {
+      "main": [
+        [
+          {
+            "node": "RESOLVE_ORG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESOLVE_ORG": {
+      "main": [
+        [
+          {
+            "node": "FIND_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LEAD_FOUND?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LEAD_FOUND?": {
+      "main": [
+        [
+          {
+            "node": "LEAD_READY",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CREATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "LEAD_READY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LEAD_READY": {
+      "main": [
+        [
+          {
+            "node": "FIND_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FIND_CONVERSATION": {
+      "main": [
+        [
+          {
+            "node": "CONVERSATION_EXISTS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONVERSATION_EXISTS?": {
+      "main": [
+        [
+          {
+            "node": "SAVE_INBOUND_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CREATE_CONVERSATION_IF_NEEDED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CREATE_CONVERSATION_IF_NEEDED": {
+      "main": [
+        [
+          {
+            "node": "SAVE_INBOUND_MESSAGE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_INBOUND_MESSAGE_HAS_ROWS": {
+      "main": [
+        [
+          {
+            "node": "CLASSIFY_GATE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLASSIFY_GATE": {
+      "main": [
+        [
+          {
+            "node": "ROUTE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE": {
+      "main": [
+        [
+          {
+            "node": "PREP_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LOG_IGNORED_STOPPED",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "FORWARD_TO_HUMAN",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_ROUTER_INPUT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_CONSENT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_21_CONSENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_ROUTER_INPUT": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_04_AI_ROUTER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "03",
+    "description": "Twilio sms webhook → lead + conversation → idempotent save → consent gate → 04 AI Router"
+  }
+}

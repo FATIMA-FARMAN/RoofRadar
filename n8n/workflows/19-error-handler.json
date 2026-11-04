@@ -1,0 +1,319 @@
+{
+  "name": "RR 19 · Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "95135622-03a6-4a5d-ab6f-40f16f41f865",
+      "name": "ERROR_TRIGGER",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $json;\nconst ex = e.execution || {};\nconst err = ex.error || e.trigger?.error || {};\nconst msg = String(err.message || err.description || 'Unknown error');\nconst codeMatch = msg.match(/\\b([45]\\d\\d)\\b/);\nconst http = Number(err.httpCode || err.context?.httpCode || (codeMatch ? codeMatch[1] : 0)) || null;\nreturn [{ json: {\n  workflow_id: e.workflow?.id || null,\n  workflow_name: e.workflow?.name || null,\n  execution_id: ex.id || null,\n  execution_url: ex.url || null,\n  retry_of: ex.retryOf || null,\n  mode: ex.mode || (e.trigger ? 'trigger' : null),\n  node_name: ex.lastNodeExecuted || err.node?.name || null,\n  node_type: err.node?.type || null,\n  message: msg.slice(0, 2000),\n  description: String(err.description || '').slice(0, 1000),\n  http_code: http\n}}];"
+      },
+      "id": "7b635563-de69-4730-975e-9fef38a02735",
+      "name": "NORMALIZE_ERROR",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $json;\nconst m = (j.message + ' ' + j.description).toLowerCase();\nconst where = ((j.node_type || '') + ' ' + (j.node_name || '')).toLowerCase();\nconst h = j.http_code;\nlet category = 'UNKNOWN', retryable = false;\n\nif (/^validation|invalid e\\.164|invalid sms body|not a valid|bad request/.test(m) || h === 400 || h === 422) category = 'VALIDATION';\nelse if (h === 401 || h === 403 || /unauthori[sz]ed|forbidden|invalid api key|incorrect api key|authentication|invalid_grant|credentials? (are|is) (invalid|missing)/.test(m)) category = 'AUTHENTICATION';\nelse if (h === 429 || /rate limit|too many requests|quota/.test(m)) { category = 'TRANSIENT_API'; retryable = !/insufficient_quota/.test(m); }\nelse if ((h && h >= 500) || /timeout|timed out|econnreset|econnrefused|etimedout|socket hang up|network|enotfound|eai_again|service unavailable|bad gateway/.test(m)) { category = 'TRANSIENT_API'; retryable = true; }\nelse if (/duplicate key|violates|constraint|syntax error|does not exist|column|relation|postgres|pg_|deadlock|could not serialize/.test(m) || /postgres/.test(where)) {\n  category = 'DATABASE'; retryable = /deadlock|could not serialize|connection terminated|too many clients/.test(m);\n}\n\n// attribute to the service when the failure is service-side\nif (category === 'TRANSIENT_API' || category === 'UNKNOWN' || category === 'AUTHENTICATION') {\n  if (/twilio/.test(where + m)) category = category === 'AUTHENTICATION' ? category : 'TWILIO';\n  else if (/calendar|googleapis|freebusy|google_event/.test(where + m)) category = category === 'AUTHENTICATION' ? category : 'CALENDAR';\n  else if (/hubspot|crm/.test(where + m)) category = category === 'AUTHENTICATION' ? category : 'CRM';\n  else if (/openai|router|qualifier|conversation|ai_generate|summary/.test(where + m)) category = category === 'AUTHENTICATION' ? category : 'AI';\n}\n\n// never blindly retry these\nif (/21610|21211|21614|unsubscribed|opted out|blacklist|not a valid phone/.test(m)) { category = 'TWILIO'; retryable = false; }\nif (/exclusion|appt_no_overlap|duplicate booking/.test(m)) retryable = false;\nif (j.mode === 'manual' || !j.execution_id || j.retry_of) retryable = false;   // retries of retries are owned by workflow 20\nif (j.mode === 'integrated') retryable = false;   // a failing sub-workflow also fails its parent; the parent run is the one we retry\n\nconst severity = (category === 'AUTHENTICATION' || category === 'DATABASE' || !retryable) ? 'CRITICAL' : 'WARNING';\nreturn [{ json: { ...j, category, retryable, severity } }];"
+      },
+      "id": "c603eb3d-29d5-4ee5-a8e5-0b40393eda50",
+      "name": "CLASSIFY_ERROR",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO errors (workflow_id, workflow_name, execution_id, execution_url, node_name, message, http_code, category, retryable, payload)\n  VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::int, $8::text, $9::boolean, $10::jsonb)\n  RETURNING *\n)\nSELECT ins.id AS error_id, ins.category, ins.retryable, (SELECT value #>> '{}' FROM app_config WHERE key = 'alert_slack_channel') AS alert_channel,\n       -- the same failure surfaces from a sub-workflow and its parent: alert once\n       EXISTS (SELECT 1 FROM errors e WHERE e.message = ins.message AND e.created_at > NOW() - INTERVAL '2 minutes') AS duplicate\nFROM ins;",
+        "options": {
+          "queryReplacement": "={{ [ $json.workflow_id, $json.workflow_name, $json.execution_id, $json.execution_url, $json.node_name, $json.message, $json.http_code, $json.category, $json.retryable, JSON.stringify($json) ] }}"
+        }
+      },
+      "id": "5b7abae4-1553-4b92-973b-3c0370cceeb1",
+      "name": "SAVE_ERROR",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "b5e604b9-4fde-46b4-80cd-8eedbb470ea4",
+              "leftValue": "={{ $json.retryable === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7222ef94-bdda-420e-8a01-0e50083ab4d7",
+      "name": "IS_RETRYABLE?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO retry_queue (error_id, workflow_name, workflow_id, operation, payload, next_attempt_at)\nSELECT $1::uuid, $2::text, $3::text, 'RERUN_EXECUTION', jsonb_build_object('execution_id', $4::text), NOW() + INTERVAL '1 minute'\nWHERE NOT EXISTS (SELECT 1 FROM retry_queue WHERE payload->>'execution_id' = $4::text)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.error_id, $('CLASSIFY_ERROR').first().json.workflow_name, $('CLASSIFY_ERROR').first().json.workflow_id, $('CLASSIFY_ERROR').first().json.execution_id ] }}"
+        }
+      },
+      "id": "f9ae66cd-6977-4716-89bf-b86e84d94750",
+      "name": "ENQUEUE_RETRY",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.alert_channel || '#roofradar-alerts' }}"
+        },
+        "text": "={{ '🔴 ' + $('CLASSIFY_ERROR').first().json.severity + ' · ' + $('CLASSIFY_ERROR').first().json.category + '\\n' + 'Workflow: ' + $('CLASSIFY_ERROR').first().json.workflow_name + '\\nNode: ' + ($('CLASSIFY_ERROR').first().json.node_name || 'n/a') + '\\nError: ' + $('CLASSIFY_ERROR').first().json.message.slice(0, 500) + ($('CLASSIFY_ERROR').first().json.execution_url ? '\\n' + $('CLASSIFY_ERROR').first().json.execution_url : '') }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "3726e56c-425b-44aa-ac65-7595efded54f",
+      "name": "SEND_SLACK_ALERT",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1800,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "__CRED_SLACK_ID__",
+          "name": "RoofRadar Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE errors SET alerted = true WHERE id = $1::uuid RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('SAVE_ERROR').first().json.error_id ] }}"
+        }
+      },
+      "id": "4943e985-628b-4413-8e17-b0d6b803c428",
+      "name": "LOG_CRITICAL_ERROR",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2060,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "15821cae-ef0c-4b58-a23c-89faa948d6e7",
+              "leftValue": "={{ $('SAVE_ERROR').first().json.duplicate !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "932e1aba-4a57-49b3-978c-b90e11b0b473",
+      "name": "NOT_A_DUPLICATE?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 19 · Error Handler\nSet as **Error Workflow** on every other RoofRadar workflow (deploy script does it).\nRetryable: 429 · 5xx · timeouts · transient DB. Never retried: 400/401/403, invalid phone/body,\nopted-out recipients, double-booking, manual runs. Retryable errors go to workflow 20; the rest alert Slack.",
+        "width": 600,
+        "height": 260
+      },
+      "id": "312b7d4c-b65d-4e58-b664-d7fccd81ad30",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "ERROR_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "NORMALIZE_ERROR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NORMALIZE_ERROR": {
+      "main": [
+        [
+          {
+            "node": "CLASSIFY_ERROR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CLASSIFY_ERROR": {
+      "main": [
+        [
+          {
+            "node": "SAVE_ERROR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_ERROR": {
+      "main": [
+        [
+          {
+            "node": "IS_RETRYABLE?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IS_RETRYABLE?": {
+      "main": [
+        [
+          {
+            "node": "ENQUEUE_RETRY",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "NOT_A_DUPLICATE?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NOT_A_DUPLICATE?": {
+      "main": [
+        [
+          {
+            "node": "SEND_SLACK_ALERT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_SLACK_ALERT": {
+      "main": [
+        [
+          {
+            "node": "LOG_CRITICAL_ERROR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "roofradar_key": "19",
+    "description": "Central Error Workflow for all 24: normalise → classify → save → retry queue or Slack alert"
+  }
+}

@@ -1,0 +1,815 @@
+{
+  "name": "RR 05 · AI Qualification",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "4ebef185-3a5e-4d18-a0c4-9a2ad3842584",
+      "name": "EXECUTE_WORKFLOW_TRIGGER",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT to_jsonb(l.*) AS lead,\n       to_jsonb(o.*) AS org,\n       rr_can_contact(l.id, coalesce(NULLIF($2::text,''), 'sms')) AS can_contact,\n       (SELECT to_jsonb(a.*) FROM appointments a\n         WHERE a.lead_id = l.id AND a.status IN ('SCHEDULED','CONFIRMED') AND a.start_at > NOW()\n         ORDER BY a.start_at LIMIT 1) AS upcoming_appointment\nFROM leads l JOIN organizations o ON o.id = l.organization_id\nWHERE l.id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.channel || 'sms' ] }}"
+        }
+      },
+      "id": "a753bfb6-05eb-42f5-aae1-940d94d0b27b",
+      "name": "GET_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_recent_messages($1::uuid, 20) AS history;",
+        "options": {
+          "queryReplacement": "={{ [ $('EXECUTE_WORKFLOW_TRIGGER').first().json.lead_id ] }}"
+        }
+      },
+      "id": "dff541fa-db47-43e6-aac1-41c45a2d3789",
+      "name": "GET_MESSAGES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, timezone, settings FROM organizations WHERE id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.lead.organization_id ] }}"
+        }
+      },
+      "id": "fe1a7803-de15-46f8-bbbd-9882f81ae842",
+      "name": "GET_COMPANY_RULES",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1020,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function fill(t, vars) { return t.replace(/\\{(\\w+)\\}/g, (m, k) => (vars[k] ?? m)); }\nfunction buildOpenAI(model, system, userObj, maxTokens) {\n  const req = {\n    model,\n    messages: [\n      { role: 'system', content: system },\n      { role: 'user', content: typeof userObj === 'string' ? userObj : JSON.stringify(userObj) }\n    ],\n    response_format: { type: 'json_object' },\n    max_completion_tokens: maxTokens || 1500\n  };\n  // GPT-5 family / o-series are reasoning models: keep reasoning light for chat latency\n  if (/^(gpt-5|o\\d)/.test(model)) req.reasoning_effort = 'low';\n  return req;\n}\nconst QUALIFIER = \"You extract roofing lead qualification facts for {company} from a conversation.\\nOnly use what the customer actually said. Use null / \\\"unknown\\\" when not stated. Do not guess.\\n\\nReturn JSON only with exactly these keys:\\n{\\n  \\\"name\\\": string|null,                 // only if the customer stated it\\n  \\\"email\\\": string|null,\\n  \\\"address\\\": string|null,\\n  \\\"address_state\\\": \\\"two-letter US state\\\"|null,\\n  \\\"service_type\\\": \\\"inspection\\\"|\\\"repair\\\"|\\\"replacement\\\"|\\\"other\\\"|\\\"unknown\\\",\\n  \\\"problem_type\\\": short phrase|null,   // e.g. \\\"roof leak\\\", \\\"missing shingles\\\", \\\"storm damage\\\"\\n  \\\"active_problem\\\": boolean,           // a current problem exists (leak, damage), not just shopping\\n  \\\"urgency\\\": \\\"LOW\\\"|\\\"MEDIUM\\\"|\\\"HIGH\\\"|\\\"EMERGENCY\\\"|\\\"UNKNOWN\\\",\\n  \\\"timeline\\\": \\\"ASAP\\\"|\\\"THIS_WEEK\\\"|\\\"THIS_MONTH\\\"|\\\"FLEXIBLE\\\"|\\\"UNKNOWN\\\",\\n  \\\"property_type\\\": \\\"single_family\\\"|\\\"multi_family\\\"|\\\"commercial\\\"|\\\"unknown\\\",\\n  \\\"budget_signal\\\": \\\"insurance_claim\\\"|\\\"price_sensitive\\\"|\\\"ready_to_spend\\\"|\\\"unknown\\\",\\n  \\\"is_decision_maker\\\": boolean|null,   // owner / authorised to approve work\\n  \\\"appointment_intent\\\": boolean,       // wants someone to come out / an inspection\\n  \\\"qualification_status\\\": \\\"QUALIFIED\\\"|\\\"PARTIAL\\\"|\\\"UNQUALIFIED\\\"|\\\"DISQUALIFIED\\\",\\n  \\\"missing_fields\\\": [\\\"problem_type\\\"|\\\"address\\\"|\\\"urgency\\\"|\\\"decision_maker\\\"|\\\"name\\\"],\\n  \\\"recommended_action\\\": \\\"BOOK\\\"|\\\"QUALIFY\\\"|\\\"ANSWER\\\"|\\\"HUMAN\\\",\\n  \\\"confidence\\\": 0.0-1.0,\\n  \\\"evidence\\\": [\\\"short quotes or paraphrases supporting the above\\\"]\\n}\\nQUALIFIED = active problem or clear need + location known or plausible + wants help.\\nDISQUALIFIED = clearly outside the service area ({service_area}) or asking for a service we do not offer ({services}).\\nDo NOT compute a numeric score.\";\n\nconst ctx = $('GET_LEAD').first().json;\nconst org = $('GET_COMPANY_RULES').first().json;\nconst s = org.settings || {};\nconst lead = ctx.lead;\nconst system = fill(QUALIFIER, {\n  company: org.name,\n  service_area: s.service_area?.description || (s.service_area?.states || []).join(', '),\n  services: (s.services || []).join(', ')\n});\nconst user = {\n  known_lead_fields: { name: lead.name, email: lead.email, address: lead.address, problem_type: lead.problem_type, source: lead.source },\n  first_message: lead.first_message,\n  conversation: $('GET_MESSAGES').first().json.history || []\n};\nreturn [{ json: { openai_request: buildOpenAI(s.ai?.models?.qualifier || 'gpt-5.4-mini', system, user, 2000) } }];"
+      },
+      "id": "af299f6c-7e1e-4a2b-8604-416450f9bf5b",
+      "name": "PREPARE_QUALIFICATION",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "options": {
+          "timeout": 20000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_request) }}"
+      },
+      "id": "e1d36c9a-f9d6-457c-ae0d-6621f286b238",
+      "name": "OPENAI_QUALIFIER",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "__CRED_OPENAI_ID__",
+          "name": "RoofRadar OpenAI"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst content = r.choices?.[0]?.message?.content || '';\nlet parsed = null, parse_error = null;\ntry { parsed = JSON.parse(content); }\ncatch (e) {\n  const m = content.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parse_error = e2.message; } }\n  else parse_error = e.message || 'empty response';\n}\nreturn [{ json: {\n  parsed, parse_error, raw: content,\n  model: r.model || null,\n  prompt_tokens: r.usage?.prompt_tokens ?? null,\n  completion_tokens: r.usage?.completion_tokens ?? null\n}}];"
+      },
+      "id": "9dbdacb4-4942-4c14-b4b0-e60224e38455",
+      "name": "PARSE_JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('PARSE_JSON').first().json;\nconst o = p.parsed || {};\nconst ctx = $('GET_LEAD').first().json;\nconst lead = ctx.lead;\nconst s = $('GET_COMPANY_RULES').first().json.settings || {};\nconst errors = [];\nif (!p.parsed) errors.push('unparseable qualifier output: ' + p.parse_error);\nconst pick = (v, list, d) => list.includes(v) ? v : d;\nconst up = v => String(v ?? '').toUpperCase();\nconst bool = v => v === true ? true : v === false ? false : null;\nconst str = v => (typeof v === 'string' && v.trim() && v.trim().toLowerCase() !== 'null') ? v.trim().slice(0, 200) : null;\n\nconst urgency = pick(up(o.urgency), ['LOW','MEDIUM','HIGH','EMERGENCY','UNKNOWN'], 'UNKNOWN');\nconst timeline = pick(up(o.timeline), ['ASAP','THIS_WEEK','THIS_MONTH','FLEXIBLE','UNKNOWN'], 'UNKNOWN');\nconst service_type = pick(String(o.service_type || '').toLowerCase(), ['inspection','repair','replacement','other','unknown'], 'unknown');\nconst property_type = pick(String(o.property_type || '').toLowerCase(), ['single_family','multi_family','commercial','unknown'], 'unknown');\nconst budget_signal = pick(String(o.budget_signal || '').toLowerCase(), ['insurance_claim','price_sensitive','ready_to_spend','unknown'], 'unknown');\nlet qs = pick(up(o.qualification_status), ['QUALIFIED','PARTIAL','UNQUALIFIED','DISQUALIFIED'], 'PARTIAL');\nlet rec = pick(up(o.recommended_action), ['BOOK','QUALIFY','ANSWER','HUMAN'], 'QUALIFY');\nlet confidence = Number(o.confidence); if (!(confidence >= 0 && confidence <= 1)) { confidence = 0; errors.push('invalid confidence'); }\n\n// service area is decided by config, not by the model\nconst states = (s.service_area?.states || []).map(x => x.toUpperCase());\nconst st = /^[A-Za-z]{2}$/.test(o.address_state || '') ? o.address_state.toUpperCase() : null;\nconst in_service_area = st ? states.includes(st) : null;\nif (in_service_area === false) qs = 'DISQUALIFIED';\nelse if (qs === 'DISQUALIFIED' && !(service_type === 'other' && confidence >= 0.8)) qs = 'PARTIAL';\n\nconst emailRaw = str(o.email);\nconst email = emailRaw && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(emailRaw) ? emailRaw.toLowerCase() : null;\nconst active_problem = o.active_problem === true;\nconst appointment_intent = o.appointment_intent === true;\nconst valid_contact = !!(lead.phone || lead.email || email);\nconst missing = Array.isArray(o.missing_fields) ? o.missing_fields.filter(x => typeof x === 'string').slice(0, 5) : [];\n\nlet next = 'QUALIFY';\nif (qs === 'DISQUALIFIED') next = 'DISQUALIFIED';\nelse if (rec === 'HUMAN') next = 'HUMAN';\nelse if (rec === 'BOOK' || (appointment_intent && active_problem) || (qs === 'QUALIFIED' && missing.length === 0)) next = 'BOOK';\n\nreturn [{ json: {\n  name: str(o.name), email, address: str(o.address), address_state: st, in_service_area,\n  service_type, problem_type: str(o.problem_type), active_problem, urgency, timeline, property_type, budget_signal,\n  is_decision_maker: bool(o.is_decision_maker), appointment_intent, valid_contact,\n  qualification_status: qs, recommended_action: rec, next, missing_fields: missing,\n  confidence, evidence: Array.isArray(o.evidence) ? o.evidence.slice(0, 6) : [],\n  valid: errors.length === 0, errors\n}}];"
+      },
+      "id": "5f50d9e0-d90e-4f76-803b-6a5d07831b2d",
+      "name": "VALIDATE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_score_lead($1::boolean, $2::text, $3::boolean, $4::boolean, $5::boolean, $6::boolean, $7::text) AS lead_score;",
+        "options": {
+          "queryReplacement": "={{ [ $('VALIDATE').first().json.active_problem, $('VALIDATE').first().json.urgency, $('VALIDATE').first().json.is_decision_maker === true, $('VALIDATE').first().json.in_service_area === true, $('VALIDATE').first().json.appointment_intent, $('VALIDATE').first().json.valid_contact, $('VALIDATE').first().json.timeline ] }}"
+        }
+      },
+      "id": "2667c395-4141-405f-9459-742fdc14f025",
+      "name": "CALCULATE_SCORE",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH u AS (\n  UPDATE leads SET\n    name                 = COALESCE(name, $2::text),\n    email                = COALESCE(email, $3::text),\n    address              = COALESCE(address, $4::text),   -- never overwrite an address the customer gave us\n    service_type         = $5::text,\n    problem_type         = COALESCE($6::text, problem_type),\n    urgency              = $7::text,\n    timeline             = $8::text,\n    property_type        = $9::text,\n    budget_signal        = $10::text,\n    is_decision_maker    = $11::boolean,\n    in_service_area      = $12::boolean,\n    qualification_status = $13::text,\n    lead_score           = $14::int,\n    status = CASE\n      WHEN status IN ('BOOKED','HUMAN_HANDOFF','STOPPED','WON','LOST','QUOTED') THEN status\n      WHEN $13::text = 'DISQUALIFIED' THEN 'DISQUALIFIED'\n      WHEN $13::text = 'QUALIFIED'    THEN 'QUALIFIED'\n      ELSE status END\n  WHERE id = $1::uuid\n  RETURNING *\n)\nSELECT u.*, CASE WHEN u.status = 'DISQUALIFIED' THEN rr_cancel_followups(u.id, 'DISQUALIFIED') ELSE 0 END AS cancelled_followups\nFROM u;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.lead.id, $('VALIDATE').first().json.name, $('VALIDATE').first().json.email, $('VALIDATE').first().json.address, $('VALIDATE').first().json.service_type, $('VALIDATE').first().json.problem_type, $('VALIDATE').first().json.urgency, $('VALIDATE').first().json.timeline, $('VALIDATE').first().json.property_type, $('VALIDATE').first().json.budget_signal, $('VALIDATE').first().json.is_decision_maker, $('VALIDATE').first().json.in_service_area, $('VALIDATE').first().json.qualification_status, $('CALCULATE_SCORE').first().json.lead_score ] }}"
+        }
+      },
+      "id": "869b2841-469f-415a-ac2f-7e63f018bd91",
+      "name": "UPDATE_LEAD",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2580,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ai_interactions (organization_id, lead_id, conversation_id, workflow, model, input, output,\n                             action, confidence, valid, error, prompt_tokens, completion_tokens)\nVALUES ($1::uuid, $2::uuid, NULLIF($3::text,'')::uuid, $4::text, $5::text, $6::jsonb, $7::jsonb,\n        NULLIF($8::text,''), $9::numeric, $10::boolean, NULLIF($11::text,''), $12::int, $13::int)\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.org.id, $('GET_LEAD').first().json.lead.id, $('EXECUTE_WORKFLOW_TRIGGER').first().json.conversation_id || '', '05_AI_QUALIFICATION', $('PARSE_JSON').first().json.model || $('PREPARE_QUALIFICATION').first().json.openai_request.model, JSON.stringify($('PREPARE_QUALIFICATION').first().json.openai_request.messages.slice(1)), JSON.stringify($('VALIDATE').first().json), $('VALIDATE').first().json.next || '', $('VALIDATE').first().json.confidence ?? null, $('VALIDATE').first().json.valid, ($('VALIDATE').first().json.errors || []).join('; '), $('PARSE_JSON').first().json.prompt_tokens, $('PARSE_JSON').first().json.completion_tokens ] }}"
+        }
+      },
+      "id": "d4ab0700-9ff3-4ae5-9387-bc32522c3d67",
+      "name": "SAVE_AI_INTERACTION",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT rr_log_event($1::uuid, $2::uuid, '05_AI_QUALIFICATION', 'LEAD_QUALIFIED', $3::jsonb) AS id;",
+        "options": {
+          "queryReplacement": "={{ [ $('GET_LEAD').first().json.lead.organization_id, $('GET_LEAD').first().json.lead.id, JSON.stringify({score: $('CALCULATE_SCORE').first().json.lead_score, status: $('VALIDATE').first().json.qualification_status, next: $('VALIDATE').first().json.next}) ] }}"
+        }
+      },
+      "id": "9120eb5c-a788-41c0-b7e0-dc0399378012",
+      "name": "LOG_EVENT",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3100,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "__CRED_POSTGRES_ID__",
+          "name": "RoofRadar Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "8c3496b1-c7c9-4d84-bac4-50ebb9f1fc5d",
+              "leftValue": "={{ $('EXECUTE_WORKFLOW_TRIGGER').first().json.mode === 'ROUTE' && ['sms','whatsapp'].includes($('EXECUTE_WORKFLOW_TRIGGER').first().json.channel) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b09e6abb-81c2-471d-9371-ecb6efac9caa",
+      "name": "ROUTE?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('VALIDATE').first().json;\nreturn [{ json: {\n  lead_id: $('GET_LEAD').first().json.lead.id,\n  lead_score: $('CALCULATE_SCORE').first().json.lead_score,\n  qualification_status: v.qualification_status, urgency: v.urgency, problem_type: v.problem_type,\n  missing_fields: v.missing_fields, recommended_action: v.next, in_service_area: v.in_service_area\n}}];"
+      },
+      "id": "ef2d2047-eeae-40f1-a7e2-d9636a695bbd",
+      "name": "RETURN_RESULT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "37a23525-75b1-43f9-931c-559c5c29e2aa",
+                    "leftValue": "={{ $('VALIDATE').first().json.next }}",
+                    "rightValue": "BOOK",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "BOOK"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "95006556-403d-45ff-9b11-49741163230f",
+                    "leftValue": "={{ $('VALIDATE').first().json.next }}",
+                    "rightValue": "HUMAN",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "HUMAN"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "d7551bf6-b395-44ed-b4af-0fdd6975ff0d",
+                    "leftValue": "={{ $('VALIDATE').first().json.next }}",
+                    "rightValue": "DISQUALIFIED",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "DISQUALIFIED"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "9315f38e-b6c3-44c0-b7e9-7767f5fb0793",
+                    "leftValue": "={{ $('VALIDATE').first().json.next }}",
+                    "rightValue": "QUALIFY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "QUALIFY"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "OTHER"
+        }
+      },
+      "id": "1f6ccc80-90b7-46cf-8996-cc4d8830db34",
+      "name": "NEXT_STEP",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        3620,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { lead_id: t.lead_id } }];"
+      },
+      "id": "c652f209-fc40-4891-90fb-ebef86de01aa",
+      "name": "PREP_AVAILABILITY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__09__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "c96a3f0d-154f-46a4-bb91-8167dc1b08b0",
+      "name": "EXECUTE_09_AVAILABILITY",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nconst slots = $json.available_slots || [];\nreturn [{ json: { ...base, mode: slots.length ? 'OFFER_SLOTS' : 'NO_SLOTS', slots } }];"
+      },
+      "id": "e324e37d-cff3-4adf-9428-6cfb0124c106",
+      "name": "PREP_OFFER_SLOTS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, reason: 'Qualification recommends a person', priority: v.urgency === 'EMERGENCY' ? 'EMERGENCY' : 'NORMAL', notify_customer: true } }];"
+      },
+      "id": "e769bb8d-796d-4cf5-9b35-b0a436505a7e",
+      "name": "PREP_HANDOFF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3880,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__15__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "2c83f899-d638-430d-a278-11a32c49e297",
+      "name": "EXECUTE_15_HUMAN_HANDOFF",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4140,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, mode: 'DISQUALIFIED', router_reason: v.in_service_area === false ? 'property is outside our service area' : 'service not offered' } }];"
+      },
+      "id": "8784b4f0-cd4c-40fa-9743-722137b56b0c",
+      "name": "PREP_DISQUALIFIED",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3880,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('EXECUTE_WORKFLOW_TRIGGER').first().json;\nconst v = $('VALIDATE').first().json;\nconst base = { lead_id: t.lead_id, conversation_id: t.conversation_id, organization_id: t.organization_id, channel: t.channel };\nreturn [{ json: { ...base, mode: 'QUALIFY', missing_fields: v.missing_fields } }];"
+      },
+      "id": "46f1d32e-ce2a-45da-9f49-f23ca3167e71",
+      "name": "PREP_ASK_MISSING",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3880,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__WF__06__"
+        },
+        "mode": "each",
+        "options": {}
+      },
+      "id": "57413d24-1a57-4716-b8b7-78dbac78adcc",
+      "name": "EXECUTE_06_AI_CONVERSATION",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        4660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 05 · Qualification\nThe LLM **extracts facts only**. Service-area and the 0–100 score are deterministic\n(`rr_score_lead()` in SQL: active problem 20 · urgent 20 · decision maker 15 · service area 15 ·\nappointment intent 10 · valid contact 10 · timeline 10).\n`mode=ROUTE` (SMS/WhatsApp) continues to booking/handoff/next question; `SCORE_ONLY`/voice just returns the result.",
+        "width": 620,
+        "height": 260
+      },
+      "id": "125b2ab9-a4ac-4217-906d-cd1ed6c95f45",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "EXECUTE_WORKFLOW_TRIGGER": {
+      "main": [
+        [
+          {
+            "node": "GET_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_LEAD": {
+      "main": [
+        [
+          {
+            "node": "GET_MESSAGES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_MESSAGES": {
+      "main": [
+        [
+          {
+            "node": "GET_COMPANY_RULES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET_COMPANY_RULES": {
+      "main": [
+        [
+          {
+            "node": "PREPARE_QUALIFICATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREPARE_QUALIFICATION": {
+      "main": [
+        [
+          {
+            "node": "OPENAI_QUALIFIER",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OPENAI_QUALIFIER": {
+      "main": [
+        [
+          {
+            "node": "PARSE_JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_JSON": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE": {
+      "main": [
+        [
+          {
+            "node": "CALCULATE_SCORE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CALCULATE_SCORE": {
+      "main": [
+        [
+          {
+            "node": "UPDATE_LEAD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UPDATE_LEAD": {
+      "main": [
+        [
+          {
+            "node": "SAVE_AI_INTERACTION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SAVE_AI_INTERACTION": {
+      "main": [
+        [
+          {
+            "node": "LOG_EVENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_EVENT": {
+      "main": [
+        [
+          {
+            "node": "ROUTE?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE?": {
+      "main": [
+        [
+          {
+            "node": "NEXT_STEP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RETURN_RESULT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NEXT_STEP": {
+      "main": [
+        [
+          {
+            "node": "PREP_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_DISQUALIFIED",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_ASK_MISSING",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "PREP_ASK_MISSING",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_09_AVAILABILITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXECUTE_09_AVAILABILITY": {
+      "main": [
+        [
+          {
+            "node": "PREP_OFFER_SLOTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_OFFER_SLOTS": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_HANDOFF": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_15_HUMAN_HANDOFF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_DISQUALIFIED": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PREP_ASK_MISSING": {
+      "main": [
+        [
+          {
+            "node": "EXECUTE_06_AI_CONVERSATION",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "__WF__19__"
+  },
+  "meta": {
+    "roofradar_key": "05",
+    "description": "LLM extracts facts → schema + business validation → deterministic SQL score → update lead → route"
+  }
+}
