@@ -4,7 +4,9 @@
 26 production n8n workflows · OpenAI · Twilio · Google Calendar · Postgres/Supabase · Slack · HubSpot.
 Built by **Fatima Ali, AI Automation Engineer**.
 
-![RoofRadar AI architecture](docs/architecture.png)
+![RoofRadar AI system architecture](docs/architecture.png)
+
+<sub>Scalable version: [docs/architecture.svg](docs/architecture.svg) · one-page overview: [docs/architecture-overview.png](docs/architecture-overview.png)</sub>
 
 | | |
 |---|---|
