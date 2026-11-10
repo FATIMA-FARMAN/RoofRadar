@@ -1,8 +1,26 @@
-# RoofRadar AI — 24-workflow production system
+# RoofRadar AI — lead-to-inspection automation for roofing companies
 
-![RoofRadar AI](media/cover.png)
+**Every lead answered in seconds, qualified by AI, and booked into the real calendar, with no double bookings.**
+26 production n8n workflows · OpenAI · Twilio · Google Calendar · Postgres/Supabase · Slack · HubSpot.
+Built by **Fatima Ali, AI Automation Engineer**.
 
-▶ Demo video: [media/roofradar-demo.mp4](media/roofradar-demo.mp4)
+![RoofRadar AI architecture](docs/architecture.png)
+
+| | |
+|---|---|
+| ▶ **Demo video (91 s)** | [media/roofradar-demo-flagship.mp4](media/roofradar-demo-flagship.mp4) |
+| **The flagship flow** | [docs/END_TO_END.md](docs/END_TO_END.md): web form → first text in under 1 s → 3 real times → booked |
+| **Case study** | [docs/CASE_STUDY.md](docs/CASE_STUDY.md): problem, solution, engineering decisions, proof |
+| **Screenshots** | [docs/screenshots/](docs/screenshots/): real n8n executions from the end-to-end test run |
+| **Run it without accounts** | [test/lab/](test/lab/README.md): local stand-ins for OpenAI, Twilio, Google, Slack |
+
+<p>
+<img src="docs/screenshots/03-ai-router-decision.png" width="49%"> <img src="docs/screenshots/04-booking-no-double-booking.png" width="49%">
+</p>
+
+---
+
+## The system in detail
 
 
 AI lead response, qualification, booking and voice reception for roofing companies, built on
